@@ -1,0 +1,17 @@
+{
+  "name": "JBD BMS",
+  "short_name": "JBD BMS",
+  "description": "Моніторинг і налаштування BMS JBD / Xiaoxiang по Bluetooth",
+  "lang": "uk",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#F3F5F7",
+  "theme_color": "#14181C",
+  "icons": [
+    { "src": "icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any maskable" },
+    { "src": "icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any maskable" },
+    { "src": "icon.svg", "sizes": "any", "type": "image/svg+xml" }
+  ]
+}
