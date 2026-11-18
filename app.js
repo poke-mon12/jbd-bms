@@ -1,7 +1,13 @@
 'use strict';
 /* JBD BMS PWA — Web Bluetooth, протокол JBD (Xiaoxiang) */
-const VERSION = '1.0.0';
+const VERSION = '1.1.0';
 const SVC = 0xff00, RX = 0xff01, TX = 0xff02;
+// Felicity Solar (FLA/FLB/LPBF): текстові команди, відповідь JSON
+const FEL_SVC = '6e6f736a-4643-4d44-8fa9-0fafd005e455';
+const FEL_RX = '49535458-8341-43f4-a9d4-ec0e34729bb3';
+const FEL_TX = '49535258-184d-4bd9-bc61-20c647249616';
+let driver = 'jbd';             // 'jbd' | 'fel'
+let felBuf = '', felWaiter = null, felRaw = null, felInfo = null;
 const $ = id => document.getElementById(id);
 const hex = a => Array.from(a, b => b.toString(16).padStart(2, '0')).join(' ');
 const fmt = (v, d) => (v == null || isNaN(v)) ? '—' : v.toFixed(d).replace('.', ',');
@@ -92,14 +98,22 @@ let lastPw = '';
 async function connect() {
   if (!navigator.bluetooth) { toast('Web Bluetooth недоступний. Відкрийте в Chrome на Android.', 4000); return; }
   try {
-    dev = await navigator.bluetooth.requestDevice({ acceptAllDevices: true, optionalServices: [SVC] });
+    dev = await navigator.bluetooth.requestDevice({ acceptAllDevices: true, optionalServices: [SVC, FEL_SVC] });
     dev.addEventListener('gattserverdisconnected', onDisc);
     setConn('conn');
     await gattConnect();
   } catch (e) { setConn('off'); log('помилка: ' + e.message); if (e.name !== 'NotFoundError') toast(e.message); }
 }
 async function gattConnect() {
-  const srv = await (await dev.gatt.connect()).getPrimaryService(SVC);
+  const gatt = await dev.gatt.connect();
+  let srv = null;
+  try { srv = await gatt.getPrimaryService(SVC); driver = 'jbd'; }
+  catch (_) {
+    try { srv = await gatt.getPrimaryService(FEL_SVC); driver = 'fel'; }
+    catch (_) { throw new Error('Невідомий тип BMS: немає сервісу JBD (FF00) і Felicity'); }
+  }
+  log('тип BMS: ' + (driver === 'fel' ? 'Felicity Solar' : 'JBD'));
+  if (driver === 'fel') return felConnect(srv);
   rxCh = await srv.getCharacteristic(RX);
   txCh = await srv.getCharacteristic(TX);
   rxCh.addEventListener('characteristicvaluechanged', onNotify);
@@ -107,6 +121,8 @@ async function gattConnect() {
   buf = [];
   $('dName').textContent = dev.name || 'JBD BMS';
   setConn('on');
+  applyDriverUi();
+  if (!params) $('pBody').innerHTML = '<div class="empty">Натисніть «Прочитати з BMS»</div>';
   log('підключено: ' + (dev.name || dev.id));
   await exclusive(async () => {
     try { const r = await rd(0x05); if (!r.status) devStrings.hw = new TextDecoder().decode(new Uint8Array(r.data)).replace(/\0/g, ''); } catch (_) {}
@@ -114,6 +130,106 @@ async function gattConnect() {
   renderDevInfo();
   startPoll();
 }
+/* ---------- Felicity ---------- */
+async function felConnect(srv) {
+  rxCh = await srv.getCharacteristic(FEL_RX);
+  const tx = await srv.getCharacteristic(FEL_TX);
+  rxCh.addEventListener('characteristicvaluechanged', felNotify);
+  // перше підключення: Android покаже запит спарювання — PIN 123456
+  for (let i = 0; ; i++) {
+    try { await rxCh.startNotifications(); break; }
+    catch (e) {
+      if (i >= 4) throw new Error('Не вдалося спарити батарею (' + e.message + '). Спаруйте її в налаштуваннях Bluetooth, PIN 123456');
+      log('спарювання: ' + e.message + ' — очікую PIN…');
+      toast('Підтвердіть спарювання, PIN 123456', 6000);
+      await sleep(6000);
+    }
+  }
+  txCh = tx; felBuf = '';
+  $('dName').textContent = dev.name || 'Felicity';
+  setConn('on');
+  log('підключено: ' + (dev.name || dev.id));
+  applyDriverUi();
+  try { felInfo = await exclusive(() => felCmd('get dev basice infor')); } catch (e) { log('basic infor: ' + e.message); }
+  renderDevInfo();
+  startPoll();
+}
+function felNotify(e) {
+  const part = new TextDecoder().decode(new Uint8Array(e.target.value.buffer));
+  if (part.startsWith('{')) felBuf = '';
+  felBuf += part;
+  if (felBuf.length > 20000) felBuf = '';
+  if (!felBuf.trimEnd().endsWith('}')) return;
+  let j; try { j = JSON.parse(felBuf); } catch (_) { return; }   // ще не весь JSON
+  felBuf = '';
+  log('← ' + JSON.stringify(j).slice(0, 400), !$('logPoll').checked);
+  if (felWaiter) { const w = felWaiter; felWaiter = null; clearTimeout(w.t); w.res(j); }
+}
+async function felWrite(bytes) {
+  try { await txCh.writeValueWithResponse(bytes); }
+  catch (e) {
+    try { await txCh.writeValueWithoutResponse(bytes); }
+    catch (_) { for (let i = 0; i < bytes.length; i += 20) await txCh.writeValueWithoutResponse(bytes.slice(i, i + 20)); }
+  }
+}
+async function felCmd(cmd, timeout = 4000) {
+  if (!txCh) throw new Error('не підключено');
+  const full = 'wifilocalMonitor:' + cmd;
+  for (let attempt = 0; attempt < 3; attempt++) {
+    log('→ ' + full, cmd === 'get dev real infor');
+    felBuf = '';
+    const p = new Promise((res, rej) => { felWaiter = { res, t: setTimeout(() => { felWaiter = null; rej(new Error('тайм-аут')); }, timeout) }; });
+    await felWrite(new TextEncoder().encode(full));
+    try { return await p; } catch (e) { if (attempt === 2) throw new Error(cmd + ': немає відповіді'); }
+  }
+}
+const felNum = v => { const n = Number(v); return isFinite(n) ? n : null; };
+const felRow = (j, k, r = 0) => (Array.isArray(j?.[k]) && Array.isArray(j[k][r])) ? j[k][r].map(felNum) : [];
+function felParse(j) {
+  const batt = [felRow(j, 'BattList', 0), felRow(j, 'BattList', 1)];
+  const soc = felRow(j, 'BatsocList', 0);
+  const cells = felRow(j, 'BatcelList', 0).filter(x => x != null && x > 0 && x < 6000);
+  const temps = felRow(j, 'BtemList', 0).filter(x => x != null && x !== 0x7fff && Math.abs(x) < 2000).map(x => x / 10);
+  const capMah = soc[2] ?? null;
+  const o = {
+    fel: true,
+    v: (batt[0][0] ?? 0) / 1000,
+    a: (batt[1][0] ?? 0) / 10,
+    soc: Math.round((soc[0] ?? 0) / 100),
+    nominal: capMah != null ? capMah / 1000 : null,
+    remain: capMah != null && soc[0] != null ? soc[0] * capMah / 1e7 : null,
+    cycles: felNum(j.BatCycle ?? j.CycleCnt ?? j.Cycle) ?? '—',
+    cells: cells.length, temps, bal: 0, prot: 0, fet: null,
+    warn: felNum(j.Bwarn) || 0, fault: felNum(j.Bfault) || 0,
+  };
+  return { o, cells };
+}
+async function felPoll() {
+  const j = await exclusive(() => felCmd('get dev real infor'));
+  if (j.CommVer != null && j.CommVer !== 1) log('увага: CommVer=' + j.CommVer + ' (очікувалось 1)');
+  felRaw = j;
+  const { o, cells } = felParse(j);
+  basic = o; cellsMv = cells;
+  if (document.querySelector('#v-srv.act')) renderFelRaw();
+}
+function applyDriverUi() {
+  const fel = driver === 'fel';
+  document.querySelector('#monBody .grid2').style.display = fel ? 'none' : '';
+  ['bBackup', 'bRestore', 'bCalZero', 'bCalCell', 'bCnt'].forEach(id => $(id).disabled = fel);
+  [$('bBackup').closest('.card'), $('bCalZero').closest('.card')].forEach(c => c.style.display = fel ? 'none' : '');
+  $('bCnt').closest('.bitrow').style.display = fel ? 'none' : '';
+  $('pFilt').style.display = fel ? 'none' : '';
+  $('felRawCard').style.display = fel ? '' : 'none';
+  if (fel) {
+    $('pInfo').textContent = 'Felicity: зміна параметрів ще не підтримується';
+    $('pBody').innerHTML = '<div class="card"><div class="ct">Felicity Solar</div><p class="lbl" style="font-size:14px">Протокол налаштувань Felicity не опублікований. Щоб додати запис параметрів, потрібен Bluetooth-лог (HCI snoop) з телефона, поки офіційний застосунок Fsolar змінює параметр.</p><p class="lbl" style="font-size:14px">Моніторинг працює повністю. Сирі дані BMS — у вкладці «Сервіс».</p></div>';
+    $('bReadP').disabled = true;
+  } else $('bReadP').disabled = false;
+}
+function renderFelRaw() {
+  $('felRaw').textContent = felRaw ? JSON.stringify(felRaw, null, 1) : '—';
+}
+
 let manualDisc = false;
 function onDisc() {
   txCh = rxCh = null; stopPoll(); setConn('off');
@@ -148,6 +264,7 @@ $('selPoll').onchange = e => { pollMs = +e.target.value; if (pollTimer) startPol
 async function poll() {
   if (!txCh || busy) return;
   try {
+    if (driver === 'fel') await felPoll(); else
     await exclusive(async () => {
       const b = await rd(0x03, true);
       if (!b.status) basic = parseBasic(b.data);
@@ -188,12 +305,16 @@ function renderMon() {
   let eta = '';
   if (b.a < -0.05) eta = ' · ~' + fmt(b.remain / -b.a, 1) + ' год';
   if (b.a > 0.05) eta = ' · до повного ~' + fmt((b.nominal - b.remain) / b.a, 1) + ' год';
-  $('mState').textContent = st + eta + ' · ' + b.cells + 'S · ' + b.cycles + ' циклів';
+  $('mState').textContent = st + eta + ' · ' + b.cells + 'S' + (b.cycles !== '—' ? ' · ' + b.cycles + ' циклів' : '');
   const chg = !!(b.fet & 1), dsg = !!(b.fet & 2);
   $('swChg').classList.toggle('on', chg); $('mChgT').textContent = chg ? 'Увімкнено' : 'Вимкнено';
   $('swDsg').classList.toggle('on', dsg); $('mDsgT').textContent = dsg ? 'Увімкнено' : 'Вимкнено';
 
   const act = PROT.filter((_, i) => b.prot & (1 << i));
+  if (b.fel) {
+    if (b.fault) act.push('Аварія BMS, код 0x' + b.fault.toString(16).toUpperCase());
+    if (b.warn) act.push('Попередження BMS, код 0x' + b.warn.toString(16).toUpperCase());
+  }
   const al = $('mAlert');
   if (act.length) { al.className = 'alert bad'; al.textContent = 'Спрацював захист: ' + act.join(', '); }
   else if (b.soc <= 10) { al.className = 'alert warn'; al.textContent = 'Низький заряд — зарядіть батарею'; }
@@ -218,7 +339,7 @@ function renderMon() {
     $('cLegend').innerHTML = `<span>макс ${fmt(max / 1000, 3)}</span><span>мін ${fmt(min / 1000, 3)}</span><span>сер ${fmt(avg / 1000, 3)} V</span>` + (b.bal ? '<span style="color:#146C3B">● балансування</span>' : '');
   }
   // температури
-  $('temps').innerHTML = b.temps.map((t, i) => `<div class="card"><div class="lbl">${i === 0 && b.temps.length > 1 ? 'MOS' : 'T' + (b.temps.length > 1 ? i : i + 1)}</div><div class="val">${fmt(t, 1)} °C</div></div>`).join('');
+  $('temps').innerHTML = b.temps.map((t, i) => `<div class="card"><div class="lbl">${b.fel ? 'T' + (i + 1) : i === 0 && b.temps.length > 1 ? 'MOS' : 'T' + (b.temps.length > 1 ? i : i + 1)}</div><div class="val">${fmt(t, 1)} °C</div></div>`).join('');
   drawChart($('chV'), hist.map(h => h.v), '#0B6BCB', $('hRange'), 'V', 2);
   drawChart($('chA'), hist.map(h => h.a), '#B45309', $('hRangeA'), 'A', 2, true);
 }
@@ -341,6 +462,7 @@ const curDisp = k => toDisp(PK[k], cur(k));
 /* ---------- читання параметрів ---------- */
 async function readParams(pw) {
   if (!txCh) { toast('Спочатку підключіться'); return false; }
+  if (driver === 'fel') { toast('Для Felicity налаштування поки недоступні'); return false; }
   $('bReadP').disabled = true; $('pInfo').textContent = 'Читаю…';
   try {
     await exclusive(async () => {
@@ -629,6 +751,14 @@ $('bCsv').onclick = () => {
 
 /* ---------- пристрій ---------- */
 function renderDevInfo() {
+  if (driver === 'fel') {
+    const f = felInfo || {};
+    const rows = [['Bluetooth-ім\'я', dev?.name], ['Тип BMS', 'Felicity Solar'], ['Модель', f.Type], ['Серійний номер', f.DevSN], ['Прошивка BMS', f.M1SwVer], ['Версія', f.version], ['Цикли', basic?.cycles !== '—' ? basic?.cycles : null]]
+      .filter(r => r[1] != null && r[1] !== '');
+    $('devInfo').innerHTML = rows.map(r => `<div class="kv"><span>${r[0]}</span><span>${String(r[1]).replace(/</g, '&lt;')}</span></div>`).join('');
+    renderFelRaw();
+    return;
+  }
   const rows = [['Bluetooth-ім\'я', dev?.name], ['Апаратна версія', devStrings.hw], ['Виробник', devStrings.mfg], ['Модель', devStrings.model], ['Штрихкод', devStrings.barcode],
     ['Прошивка', basic ? '0x' + basic.ver.toString(16) + ' (' + basic.ver + ')' : null],
     ['Дата виробництва', basic ? `${((basic.date >> 9) + 2000)}-${String((basic.date >> 5) & 15).padStart(2, '0')}-${String(basic.date & 31).padStart(2, '0')}` : null],
@@ -668,3 +798,4 @@ window.addEventListener('resize', () => renderMon());
 /* ---------- PWA ---------- */
 if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(e => log('SW: ' + e.message));
 renderAutoBk(); renderDevInfo();
+$('bFelCopy').onclick = async () => { try { await navigator.clipboard.writeText(JSON.stringify(felRaw, null, 1)); toast('Скопійовано'); } catch (_) { toast('Не вдалося скопіювати'); } };

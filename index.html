@@ -210,6 +210,11 @@ canvas{width:100%;height:80px;display:block}
       <div class="bitrow"><span>Завантажити CSV</span><button class="btn sm" id="bCsv">Завантажити</button></div>
     </div>
 
+    <div class="card" id="felRawCard" style="display:none">
+      <div class="ct"><span>Сирі дані BMS (JSON)</span><small><button class="btn sm" id="bFelCopy">Копіювати</button></small></div>
+      <pre id="felRaw" style="background:var(--bg);border-radius:10px;padding:10px;font:11px/1.45 ui-monospace,Menlo,monospace;max-height:300px;overflow:auto;white-space:pre-wrap;word-break:break-all;margin:8px 0 0">—</pre>
+    </div>
+
     <div class="card">
       <div class="ct"><span>Протокол обміну</span><small><button class="btn sm" id="bLogClr">Очистити</button></small></div>
       <label class="bitrow" style="padding:8px 0;border:0"><span>Показувати опитування</span><input type="checkbox" id="logPoll"></label>
