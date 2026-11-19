@@ -1,6 +1,6 @@
 'use strict';
 /* JBD BMS PWA — Web Bluetooth, протокол JBD (Xiaoxiang) */
-const VERSION = '1.1.0';
+const VERSION = '1.2.0';
 const SVC = 0xff00, RX = 0xff01, TX = 0xff02;
 // Felicity Solar (FLA/FLB/LPBF): текстові команди, відповідь JSON
 const FEL_SVC = '6e6f736a-4643-4d44-8fa9-0fafd005e455';
@@ -151,6 +151,7 @@ async function felConnect(srv) {
   log('підключено: ' + (dev.name || dev.id));
   applyDriverUi();
   try { felInfo = await exclusive(() => felCmd('get dev basice infor')); } catch (e) { log('basic infor: ' + e.message); }
+  setConn('on');
   renderDevInfo();
   startPoll();
 }
@@ -201,6 +202,11 @@ function felParse(j) {
     cycles: felNum(j.BatCycle ?? j.CycleCnt ?? j.Cycle) ?? '—',
     cells: cells.length, temps, bal: 0, prot: 0, fet: null,
     warn: felNum(j.Bwarn) || 0, fault: felNum(j.Bfault) || 0,
+    soh: soc[1] != null ? soc[1] / 10 : null,
+    boardTemps: felRow(j, 'BTemp', 1).filter(x => x != null && x !== 0x7fff && x !== 65535 && Math.abs(x) < 2000).map(x => x / 10),
+    limits: (() => { const v = felRow(j, 'LVolCur', 0), c = felRow(j, 'LVolCur', 1); return v.length ? { cvl: v[0] / 10, dvl: v[1] / 10, ccl: c[0], dcl: c[1] } : null; })(),
+    state: felNum(j.Bstate), estate: felNum(j.Estate), bmsDate: j.date || null,
+    type: j.Type, subType: j.SubType, sn: j.DevSN,
   };
   return { o, cells };
 }
@@ -210,7 +216,7 @@ async function felPoll() {
   felRaw = j;
   const { o, cells } = felParse(j);
   basic = o; cellsMv = cells;
-  if (document.querySelector('#v-srv.act')) renderFelRaw();
+  if (document.querySelector('#v-srv.act')) renderDevInfo();
 }
 function applyDriverUi() {
   const fel = driver === 'fel';
@@ -220,6 +226,7 @@ function applyDriverUi() {
   $('bCnt').closest('.bitrow').style.display = fel ? 'none' : '';
   $('pFilt').style.display = fel ? 'none' : '';
   $('felRawCard').style.display = fel ? '' : 'none';
+  if (!fel) $('limCard').style.display = 'none';
   if (fel) {
     $('pInfo').textContent = 'Felicity: зміна параметрів ще не підтримується';
     $('pBody').innerHTML = '<div class="card"><div class="ct">Felicity Solar</div><p class="lbl" style="font-size:14px">Протокол налаштувань Felicity не опублікований. Щоб додати запис параметрів, потрібен Bluetooth-лог (HCI snoop) з телефона, поки офіційний застосунок Fsolar змінює параметр.</p><p class="lbl" style="font-size:14px">Моніторинг працює повністю. Сирі дані BMS — у вкладці «Сервіс».</p></div>';
@@ -247,7 +254,7 @@ async function reconnect() {
 function setConn(s) {
   $('cDot').className = 'dot' + (s === 'on' ? ' on' : '');
   $('cTxt').textContent = s === 'on' ? 'Підключено' : s === 'conn' ? 'Підключення…' : 'Підключити';
-  $('dSub').textContent = s === 'on' ? (dev?.id?.slice(0, 17) || '') + (devStrings.hw ? ' · ' + devStrings.hw : '') : 'не підключено';
+  $('dSub').textContent = s === 'on' ? (driver === 'fel' ? 'SN ' + (felInfo?.DevSN || felRaw?.DevSN || '—') : (dev?.id?.slice(0, 17) || '') + (devStrings.hw ? ' · ' + devStrings.hw : '')) : 'не підключено';
   $('swChg').disabled = $('swDsg').disabled = s !== 'on';
 }
 $('bConn').onclick = async () => {
@@ -303,9 +310,9 @@ function renderMon() {
   $('gauge').style.background = `conic-gradient(${col} 0 ${b.soc}%, #2A3138 ${b.soc}% 100%)`;
   const st = b.a > 0.05 ? 'Заряд' : b.a < -0.05 ? 'Розряд' : 'Простій';
   let eta = '';
-  if (b.a < -0.05) eta = ' · ~' + fmt(b.remain / -b.a, 1) + ' год';
-  if (b.a > 0.05) eta = ' · до повного ~' + fmt((b.nominal - b.remain) / b.a, 1) + ' год';
-  $('mState').textContent = st + eta + ' · ' + b.cells + 'S' + (b.cycles !== '—' ? ' · ' + b.cycles + ' циклів' : '');
+  if (b.a <= -1 && b.remain != null) eta = ' · ~' + fmt(b.remain / -b.a, 1) + ' год';
+  if (b.a >= 1 && b.remain != null && b.nominal != null) eta = ' · до повного ~' + fmt((b.nominal - b.remain) / b.a, 1) + ' год';
+  $('mState').textContent = st + eta + ' · ' + b.cells + 'S' + (b.soh != null ? ' · SOH ' + fmt(b.soh, 0) + ' %' : '') + (b.cycles !== '—' ? ' · ' + b.cycles + ' циклів' : '');
   const chg = !!(b.fet & 1), dsg = !!(b.fet & 2);
   $('swChg').classList.toggle('on', chg); $('mChgT').textContent = chg ? 'Увімкнено' : 'Вимкнено';
   $('swDsg').classList.toggle('on', dsg); $('mDsgT').textContent = dsg ? 'Увімкнено' : 'Вимкнено';
@@ -329,9 +336,10 @@ function renderMon() {
     $('cTitle').textContent = 'Банки · ' + n + 'S';
     $('cDelta').innerHTML = 'Δ <b class="mono" style="color:var(--ink)">' + (max - min) + ' mV</b>';
     const lo = Number(params?.cuvp ?? 2800), hi = Number(params?.covp ?? 4200);
+    const iMax = cellsMv.indexOf(max), iMin = cellsMv.indexOf(min);
     $('cells').innerHTML = cellsMv.map((mv, i) => {
       let c = 'cell';
-      if (mv < 500) c += ' zero'; else if (mv === max && max !== min) c += ' max'; else if (mv === min && max !== min) c += ' min';
+      if (mv < 500) c += ' zero'; else if (i === iMax && max !== min) c += ' max'; else if (i === iMin && max !== min) c += ' min';
       if (b.bal & (1 << i)) c += ' bal';
       const pct = Math.max(0, Math.min(100, (mv - lo) / (hi - lo) * 100));
       return `<div class="${c}"><span class="lbl">#${i + 1}</span><b class="mono">${(mv / 1000).toFixed(3)}</b><div class="bar"><i style="width:${pct}%"></i></div></div>`;
@@ -339,7 +347,19 @@ function renderMon() {
     $('cLegend').innerHTML = `<span>макс ${fmt(max / 1000, 3)}</span><span>мін ${fmt(min / 1000, 3)}</span><span>сер ${fmt(avg / 1000, 3)} V</span>` + (b.bal ? '<span style="color:#146C3B">● балансування</span>' : '');
   }
   // температури
-  $('temps').innerHTML = b.temps.map((t, i) => `<div class="card"><div class="lbl">${b.fel ? 'T' + (i + 1) : i === 0 && b.temps.length > 1 ? 'MOS' : 'T' + (b.temps.length > 1 ? i : i + 1)}</div><div class="val">${fmt(t, 1)} °C</div></div>`).join('');
+  const tCards = b.fel ? b.temps.map((t, i) => ['Банки T' + (i + 1), t]).concat((b.boardTemps || []).map((t, i) => ['Плата BMS ' + (i + 1), t])) : null;
+  if (b.fel) {
+    $('temps').innerHTML = tCards.map(([n, t]) => `<div class="card"><div class="lbl">${n}</div><div class="val">${fmt(t, 1)} °C</div></div>`).join('');
+    const L = b.limits;
+    $('limCard').style.display = L ? '' : 'none';
+    if (L) $('limBody').innerHTML =
+      `<div class="kv"><span>Напруга заряду (CVL)</span><b class="mono">${fmt(L.cvl, 1)} V</b></div>` +
+      `<div class="kv"><span>Напруга відсічки розряду (DVL)</span><b class="mono">${fmt(L.dvl, 1)} V</b></div>` +
+      `<div class="kv"><span>Ліміт струму заряду (CCL)</span><b class="mono">${L.ccl ?? '—'}</b></div>` +
+      `<div class="kv"><span>Ліміт струму розряду (DCL)</span><b class="mono">${L.dcl ?? '—'}</b></div>` +
+      `<div class="hint" style="padding-left:0;padding-right:0">Струми — сирі значення BMS, масштаб не підтверджено</div>`;
+  } else
+  $('temps').innerHTML = b.temps.map((t, i) => `<div class="card"><div class="lbl">${i === 0 && b.temps.length > 1 ? 'MOS' : 'T' + (b.temps.length > 1 ? i : i + 1)}</div><div class="val">${fmt(t, 1)} °C</div></div>`).join('');
   drawChart($('chV'), hist.map(h => h.v), '#0B6BCB', $('hRange'), 'V', 2);
   drawChart($('chA'), hist.map(h => h.a), '#B45309', $('hRangeA'), 'A', 2, true);
 }
@@ -753,7 +773,11 @@ $('bCsv').onclick = () => {
 function renderDevInfo() {
   if (driver === 'fel') {
     const f = felInfo || {};
-    const rows = [['Bluetooth-ім\'я', dev?.name], ['Тип BMS', 'Felicity Solar'], ['Модель', f.Type], ['Серійний номер', f.DevSN], ['Прошивка BMS', f.M1SwVer], ['Версія', f.version], ['Цикли', basic?.cycles !== '—' ? basic?.cycles : null]]
+    const r = felRaw || {};
+    const hx = v => v == null ? null : '0x' + Number(v).toString(16).toUpperCase().padStart(4, '0') + ' (' + v + ')';
+    const d = r.date && /^\d{14}$/.test(r.date) ? `${r.date.slice(0, 4)}-${r.date.slice(4, 6)}-${r.date.slice(6, 8)} ${r.date.slice(8, 10)}:${r.date.slice(10, 12)}:${r.date.slice(12, 14)}` : r.date;
+    const rows = [['Bluetooth-ім\'я', dev?.name], ['Тип BMS', 'Felicity Solar'], ['Тип / підтип', (f.Type ?? r.Type) != null ? (f.Type ?? r.Type) + ' / ' + (r.SubType ?? '—') : null], ['Серійний номер', f.DevSN || r.DevSN], ['Прошивка BMS', f.M1SwVer], ['Версія', f.version],
+      ['SOH', basic?.soh != null ? fmt(basic.soh, 1) + ' %' : null], ['Стан BMS (Bstate)', hx(r.Bstate)], ['Стан (Estate)', hx(r.Estate)], ['Годинник BMS', d], ['Цикли', basic?.cycles !== '—' ? basic?.cycles : null]]
       .filter(r => r[1] != null && r[1] !== '');
     $('devInfo').innerHTML = rows.map(r => `<div class="kv"><span>${r[0]}</span><span>${String(r[1]).replace(/</g, '&lt;')}</span></div>`).join('');
     renderFelRaw();
