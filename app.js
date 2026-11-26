@@ -1,6 +1,6 @@
 'use strict';
 /* JBD BMS PWA — Web Bluetooth, протокол JBD (Xiaoxiang) */
-const VERSION = '1.6.0';
+const VERSION = '1.6.1';
 const SVC = 0xff00, RX = 0xff01, TX = 0xff02;
 // Felicity Solar (FLA/FLB/LPBF): текстові команди, відповідь JSON
 const FEL_SVC = '6e6f736a-4643-4d44-8fa9-0fafd005e455';
@@ -60,7 +60,7 @@ function onNotify(e) {
     const len = buf[3], total = len + 7;
     if (buf.length < total) return;
     const p = buf.slice(0, total); buf = buf.slice(total);
-    if (p[total - 1] !== 0x77) { log('битий пакет ' + hex(p)); continue; }
+    if (p[total - 1] !== 0x77) { log('пошкоджений пакет ' + hex(p)); continue; }
     if (waiter && waiter.reg === p[1]) { const w = waiter; waiter = null; clearTimeout(w.t); w.res({ status: p[2], data: p.slice(4, 4 + len) }); }
   }
 }
@@ -150,7 +150,7 @@ async function connect() {
     try { if (dev?.gatt?.connected) { manualDisc = true; dev.gatt.disconnect(); } } catch (_) {}
   }
 }
-// список доступних сервісів; якщо пристрій рве зв'язок — одна повторна спроба
+// список доступних сервісів; якщо пристрій розриває з'єднання — одна повторна спроба
 async function listServices(gatt) {
   for (let i = 0; i < 2; i++) {
     try {
@@ -201,13 +201,13 @@ async function felConnect(srv) {
   rxCh = await srv.getCharacteristic(FEL_RX);
   const tx = await srv.getCharacteristic(FEL_TX);
   rxCh.addEventListener('characteristicvaluechanged', felNotify);
-  // перше підключення: Android покаже запит спарювання — PIN 123456
+  // перше підключення: Android покаже запит на створення пари — PIN 123456
   for (let i = 0; ; i++) {
     try { await rxCh.startNotifications(); break; }
     catch (e) {
-      if (i >= 4) throw new Error('Не вдалося спарити батарею (' + e.message + '). Спаруйте її в налаштуваннях Bluetooth, PIN 123456');
-      log('спарювання: ' + e.message + ' — очікую PIN…');
-      toast('Підтвердіть спарювання, PIN 123456', 6000);
+      if (i >= 4) throw new Error('Не вдалося створити пару з батареєю (' + e.message + '). Створіть пару в налаштуваннях Bluetooth, PIN 123456');
+      log('створення пари: ' + e.message + ' — очікую PIN…');
+      toast('Підтвердіть створення пари, PIN 123456', 6000);
       await sleep(6000);
     }
   }
@@ -571,7 +571,7 @@ const JKP = [
   // [reg, key, група, назва, тип, масштаб, знаків, мін, макс, пара]
   [0x04, 'ovp', 'cell', 'Перезаряд банки', 'v', 0.001, 3, 2, 4.6, 'ovpr'],
   [0x05, 'ovpr', 'cell', null, 'v', 0.001, 3, 2, 4.6],
-  [0x02, 'uvp', 'cell', 'Переразряд банки', 'v', 0.001, 3, 1.5, 4.2, 'uvpr'],
+  [0x02, 'uvp', 'cell', 'Перерозряд банки', 'v', 0.001, 3, 1.5, 4.2, 'uvpr'],
   [0x03, 'uvpr', 'cell', null, 'v', 0.001, 3, 1.5, 4.2],
   [0x0b, 'poff', 'cell', 'Вимкнення BMS', 'v', 0.001, 3, 1.5, 4],
   [0x01, 'sleep', 'cell', 'Напруга сну', 'v', 0.001, 3, 1.5, 4.5],
@@ -605,6 +605,8 @@ const JKP = [
   [0x1f, 'swBal', 'sw', 'Балансування', 'b'],
 ].map(a => ({ r: a[0], k: a[1], g: a[2], n: a[3], t: a[4], s: a[5], d: a[6], min: a[7], max: a[8], pair: a[9], u: a[10] ?? (a[4] === 'v' ? (a[5] === 0.001 && a[6] === 1 ? 'A' : 'V') : a[4] === 't' ? '°C' : '') }));
 const JKPK = Object.fromEntries(JKP.map(p => [p.k, p]));
+// параметри, яких немає в старіших прошивках (BMS віддає 0) — не показуємо поле і не перевіряємо
+const JK_OPTIONAL = new Set(['rcv', 'rfv', 'soc100', 'soc0', 'sleep', 'balstart']);
 const JK_GROUPS = [['sw', 'Перемикачі'], ['cell', 'Напруга банки'], ['bal', 'Баланс'], ['cur', 'Струм і КЗ'], ['temp', 'Температура'], ['bat', 'Батарея']];
 function jkParse(f) {
   const o = {};
@@ -633,6 +635,10 @@ function renderJkParams() {
       if (!p.n) continue;
       if (p.t === 'b') {
         body += `<div class="bitrow"><span>${p.n}${p.k in jkEdits ? ' <span class="was">змінено</span>' : ''}</span><button class="sw ${jkCur(p.k) ? 'on' : ''}" data-jksw="${p.k}" aria-label="${p.n}" ${jkSane ? '' : 'disabled'}></button></div>`;
+        continue;
+      }
+      if (!p.pair && JK_OPTIONAL.has(p.k) && jkSet[p.k] === 0 && !(p.k in jkEdits)) {
+        body += `<div class="pr single"><span class="nm">${p.n} <span class="unit">${p.u}</span></span><span class="lbl" style="text-align:right">не використовується</span></div>`;
         continue;
       }
       const inp = q => `<input inputmode="decimal" data-jk="${q.k}" value="${jkDisp(q, jkCur(q.k))}" class="${q.k in jkEdits ? 'ch' : ''}" aria-label="${q.n || q.k}" ${jkSane ? '' : 'disabled'}>`;
@@ -665,10 +671,10 @@ $('pBody').addEventListener('click', e => {
 function jkValidate(v) {
   const err = [], warn = [];
   if (v.ovpr >= v.ovp) err.push('Відновлення перезаряду має бути нижче порогу');
-  if (v.uvpr <= v.uvp) err.push('Відновлення переразряду має бути вище порогу');
-  if (v.uvp >= v.ovp) err.push('Переразряд вище перезаряду');
-  if (v.poff >= v.uvp) warn.push('Напруга вимкнення BMS не нижча за поріг переразряду');
-  if (v.rcv > v.ovp) err.push('Напруга заряду (RCV) вище порогу перезаряду');
+  if (v.uvpr <= v.uvp) err.push('Відновлення перерозряду має бути вище порогу');
+  if (v.uvp >= v.ovp) err.push('Перерозряд вище перезаряду');
+  if (v.poff && v.poff >= v.uvp) warn.push('Напруга вимкнення BMS не нижча за поріг перерозряду');
+  if (v.rcv && v.rcv > v.ovp) err.push('Напруга заряду (RCV) вища за поріг перезаряду');
   if (v.cotr >= v.cot || v.dotr >= v.dot || v.motr >= v.mot) err.push('Відновлення перегріву має бути нижче порогу');
   if (v.cutr <= v.cut) err.push('Відновлення холоду має бути вище порогу');
   if (v.cells !== jkSet.cells) warn.push(`Кількість банок ${jkSet.cells} → ${v.cells}: перевірте balance-шлейф`);
@@ -797,7 +803,7 @@ function parseBasic(d) {
   for (let i = 0; i < o.ntc && 23 + i * 2 + 1 < d.length; i++) o.temps.push((u16(d, 23 + i * 2) - 2731) / 10);
   return o;
 }
-const PROT = ['Перезаряд банки', 'Переразряд банки', 'Перезаряд пакета', 'Переразряд пакета', 'Перегрів при заряді', 'Холод при заряді', 'Перегрів при розряді', 'Холод при розряді', 'Струм заряду', 'Струм розряду', 'Коротке замикання', 'Помилка AFE', 'Програмне блокування MOS'];
+const PROT = ['Перезаряд банки', 'Перерозряд банки', 'Перезаряд пакета', 'Перерозряд пакета', 'Перегрів при заряді', 'Холод при заряді', 'Перегрів при розряді', 'Холод при розряді', 'Струм заряду', 'Струм розряду', 'Коротке замикання', 'Помилка AFE', 'Програмне блокування MOS'];
 
 /* ---------- рендер моніторингу ---------- */
 function renderMon() {
@@ -921,12 +927,12 @@ const P = [
   // напруга банки
   { k: 'covp', r: 0x24, g: 'cell', n: 'Перезаряд', pair: 'covp_rel', t: 'v', s: 0.001, u: 'V', d: 3, min: 2, max: 4.5 },
   { k: 'covp_rel', r: 0x25, g: 'cell', t: 'v', s: 0.001, u: 'V', d: 3, min: 2, max: 4.5, sub: 1 },
-  { k: 'cuvp', r: 0x26, g: 'cell', n: 'Переразряд', pair: 'cuvp_rel', t: 'v', s: 0.001, u: 'V', d: 3, min: 1.5, max: 4 },
+  { k: 'cuvp', r: 0x26, g: 'cell', n: 'Перерозряд', pair: 'cuvp_rel', t: 'v', s: 0.001, u: 'V', d: 3, min: 1.5, max: 4 },
   { k: 'cuvp_rel', r: 0x27, g: 'cell', t: 'v', s: 0.001, u: 'V', d: 3, min: 1.5, max: 4, sub: 1 },
   // напруга пакета
   { k: 'povp', r: 0x20, g: 'pack', n: 'Перезаряд', pair: 'povp_rel', t: 'v', s: 0.01, u: 'V', d: 2, min: 3, max: 150 },
   { k: 'povp_rel', r: 0x21, g: 'pack', t: 'v', s: 0.01, u: 'V', d: 2, min: 3, max: 150, sub: 1 },
-  { k: 'puvp', r: 0x22, g: 'pack', n: 'Переразряд', pair: 'puvp_rel', t: 'v', s: 0.01, u: 'V', d: 2, min: 3, max: 150 },
+  { k: 'puvp', r: 0x22, g: 'pack', n: 'Перерозряд', pair: 'puvp_rel', t: 'v', s: 0.01, u: 'V', d: 2, min: 3, max: 150 },
   { k: 'puvp_rel', r: 0x23, g: 'pack', t: 'v', s: 0.01, u: 'V', d: 2, min: 3, max: 150, sub: 1 },
   // струм
   { k: 'chgoc', r: 0x28, g: 'cur', n: 'Макс. струм заряду', t: 'v', s: 0.01, u: 'A', d: 2, min: 0.1, max: 600 },
@@ -951,13 +957,13 @@ const P = [
   { k: 'cap_20', r: 0x35, g: 'soc', n: '20 %', t: 'v', s: 0.001, u: 'V', d: 3, min: 2, max: 4.5 },
   { k: 'cap_0', r: 0x13, g: 'soc', n: '0 %', t: 'v', s: 0.001, u: 'V', d: 3, min: 1.5, max: 4.5 },
   // функції
-  { k: 'func', r: 0x2d, g: 'func', n: 'Функції', t: 'bits', bits: ['Вимикач (switch)', 'Детект навантаження', 'Балансування', 'Баланс лише при заряді', 'LED індикатор', 'LED: 5 сегментів'] },
+  { k: 'func', r: 0x2d, g: 'func', n: 'Функції', t: 'bits', bits: ['Вимикач (switch)', 'Виявлення навантаження', 'Балансування', 'Баланс лише при заряді', 'LED індикатор', 'LED: 5 сегментів'] },
   { k: 'ntc', r: 0x2e, g: 'func', n: 'Датчики NTC', t: 'bits', bits: ['NTC1', 'NTC2', 'NTC3', 'NTC4', 'NTC5', 'NTC6', 'NTC7', 'NTC8'] },
   { k: 'fet_time', r: 0x30, g: 'func', n: 'Затримка MOS', t: 'int', u: 'с', min: 0, max: 65535 },
   { k: 'led_time', r: 0x31, g: 'func', n: 'Час LED', t: 'int', u: 'с', min: 0, max: 65535 },
   // апаратні
   { k: 'covp_hw', r: 0x36, g: 'hw', n: 'Апаратний перезаряд банки', t: 'v', s: 0.001, u: 'V', d: 3, min: 2, max: 5 },
-  { k: 'cuvp_hw', r: 0x37, g: 'hw', n: 'Апаратний переразряд банки', t: 'v', s: 0.001, u: 'V', d: 3, min: 1, max: 4 },
+  { k: 'cuvp_hw', r: 0x37, g: 'hw', n: 'Апаратний перерозряд банки', t: 'v', s: 0.001, u: 'V', d: 3, min: 1, max: 4 },
 ];
 const PK = Object.fromEntries(P.map(p => [p.k, p]));
 const GROUPS = [
@@ -1051,7 +1057,7 @@ function renderParams() {
     let body = '';
     if (g === 'bat') {
       const chem = detectChem();
-      body += `<div class="pr single"><span class="nm">Хімія (пресет порогів)</span><select id="selChem">${['—', 'NMC', 'LFP', 'LTO'].map(c => `<option ${c === chem ? 'selected' : ''}>${c}</option>`).join('')}</select></div>`;
+      body += `<div class="pr single"><span class="nm">Хімія (набір порогів)</span><select id="selChem">${['—', 'NMC', 'LFP', 'LTO'].map(c => `<option ${c === chem ? 'selected' : ''}>${c}</option>`).join('')}</select></div>`;
     }
     const paired = ps.some(p => p.pair);
     if (paired) body += `<div class="pr head"><span></span><span>Поріг</span><span>Відновл.</span></div>`;
@@ -1105,7 +1111,7 @@ $('pBody').addEventListener('change', e => {
   if (e.target.id === 'selChem') {
     const pr = PRESETS[e.target.value]; if (!pr) return;
     for (const [k, mv] of Object.entries(pr)) if (params[k] != null) setEdit(k, mv); // усі пресетні регістри в mV = raw
-    toast('Пресет ' + e.target.value + ' підставлено. Перевірте пороги пакета.');
+    toast('Набір порогів ' + e.target.value + ' підставлено. Перевірте пороги пакета.');
     renderParams(); return;
   }
   const k = e.target.dataset.k; if (!k) return;
@@ -1128,15 +1134,15 @@ function validate(vals) {
   const g = k => g0(k) ?? NaN;   // NaN робить усі порівняння false
   const n = vals.cell_cnt;
   if (g('covp_rel') >= g('covp')) err.push('Банка: відновлення перезаряду має бути нижче порогу');
-  if (g('cuvp_rel') <= g('cuvp')) err.push('Банка: відновлення переразряду має бути вище порогу');
+  if (g('cuvp_rel') <= g('cuvp')) err.push('Банка: відновлення перерозряду має бути вище порогу');
   if (g('povp_rel') >= g('povp')) err.push('Пакет: відновлення перезаряду має бути нижче порогу');
-  if (g('puvp_rel') <= g('puvp')) err.push('Пакет: відновлення переразряду має бути вище порогу');
-  if (g('cuvp') >= g('covp')) err.push('Переразряд банки вище перезаряду');
+  if (g('puvp_rel') <= g('puvp')) err.push('Пакет: відновлення перерозряду має бути вище порогу');
+  if (g('cuvp') >= g('covp')) err.push('Перерозряд банки вище перезаряду');
   if (n && has('povp', 'puvp', 'covp', 'cuvp', 'covp_rel')) {
     const pov = g('povp') / n, puv = g('puvp') / n;
-    if (pov > g('covp') * 1.03) warn.push(`Пакетний перезаряд (${fmt(pov, 3)} V/банку) вище банкового — захист пакета не спрацює раніше`);
-    if (pov < g('covp_rel') * 0.9) warn.push(`Пакетний перезаряд (${fmt(pov, 3)} V/банку) суттєво нижче банкового — недозаряд`);
-    if (puv < g('cuvp') * 0.9) warn.push(`Пакетний переразряд (${fmt(puv, 3)} V/банку) нижче банкового`);
+    if (pov > g('covp') * 1.03) warn.push(`Пакетний перезаряд (${fmt(pov, 3)} V/банку) вищий за поріг банки — захист пакета не спрацює раніше`);
+    if (pov < g('covp_rel') * 0.9) warn.push(`Пакетний перезаряд (${fmt(pov, 3)} V/банку) значно нижчий за поріг банки — батарея недозаряджатиметься`);
+    if (puv < g('cuvp') * 0.9) warn.push(`Пакетний перерозряд (${fmt(puv, 3)} V/банку) нижчий за поріг банки`);
   }
   if (vals.cell_cnt != null && basic && vals.cell_cnt !== params.cell_cnt) warn.push(`Кількість банок ${params.cell_cnt} → ${vals.cell_cnt}: перевірте підключення balance-шлейфа`);
   if (g('chgot_rel') >= g('chgot') || g('dsgot_rel') >= g('dsgot')) err.push('Температура: відновлення перегріву має бути нижче порогу');
@@ -1237,7 +1243,7 @@ $('fRestore').onchange = async e => {
 };
 
 /* ---------- лічильники, калібрування ---------- */
-const CNT = ['Коротке замикання', 'Струм заряду', 'Струм розряду', 'Перезаряд банки', 'Переразряд банки', 'Перегрів (заряд)', 'Холод (заряд)', 'Перегрів (розряд)', 'Холод (розряд)', 'Перезаряд пакета', 'Переразряд пакета'];
+const CNT = ['Коротке замикання', 'Струм заряду', 'Струм розряду', 'Перезаряд банки', 'Перерозряд банки', 'Перегрів (заряд)', 'Холод (заряд)', 'Перегрів (розряд)', 'Холод (розряд)', 'Перезаряд пакета', 'Перерозряд пакета'];
 $('bCnt').onclick = async () => {
   try {
     const d = await exclusive(async () => { await enterFactory(lastPw); try { const r = await rd(0xaa); if (r.status) throw new Error('не підтримується'); return r.data; } finally { await exitNoSave(); } });
