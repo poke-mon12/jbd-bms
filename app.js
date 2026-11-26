@@ -1,12 +1,12 @@
 'use strict';
 /* JBD BMS PWA — Web Bluetooth, протокол JBD (Xiaoxiang) */
-const VERSION = '1.6.1';
+const VERSION = '1.6.2';
 const SVC = 0xff00, RX = 0xff01, TX = 0xff02;
 // Felicity Solar (FLA/FLB/LPBF): текстові команди, відповідь JSON
 const FEL_SVC = '6e6f736a-4643-4d44-8fa9-0fafd005e455';
 const FEL_RX = '49535458-8341-43f4-a9d4-ec0e34729bb3';
 const FEL_TX = '49535258-184d-4bd9-bc61-20c647249616';
-let driver = 'jbd';             // 'jbd' | 'fel' | 'atorch'
+let driver = 'jbd';             // 'jbd' | 'fel' | 'ffe0' (визначення) | 'atorch' | 'jk' | 'generic'
 // Atorch DL24 / DL24P / DL24M (електронне навантаження): FFE0/FFE1, пакети FF 55 01 <тип> …
 const AT_SVC = 0xffe0, AT_CH = 0xffe1;
 let atBuf = [], atDev = 2, atLast = null, atRawHex = '';
@@ -140,7 +140,8 @@ async function connect() {
   // стара сесія могла лишити GATT-з'єднання: підключений пристрій не рекламує себе і не з'являється у списку
   try { if (dev?.gatt?.connected) { manualDisc = true; dev.gatt.disconnect(); await sleep(300); } } catch (_) {}
   try {
-    dev = await navigator.bluetooth.requestDevice({ acceptAllDevices: true, optionalServices: [...new Set([SVC, FEL_SVC, AT_SVC, ...PROBE_SVCS, ...extraUuids()])] });
+    let wide = false; try { wide = localStorage.getItem('jbd_wide_probe') === '1'; } catch (_) {}
+    dev = await navigator.bluetooth.requestDevice({ acceptAllDevices: true, optionalServices: [...new Set([SVC, FEL_SVC, AT_SVC, ...(wide ? PROBE_SVCS : []), ...extraUuids()])] });
     dev.addEventListener('gattserverdisconnected', onDisc);
     setConn('conn');
     await gattConnect();
@@ -174,11 +175,11 @@ async function gattConnect() {
   let srv = null;
   if ((srv = has(SVC))) driver = 'jbd';
   else if ((srv = has(FEL_SVC))) driver = 'fel';
-  else if ((srv = has(AT_SVC)) && (await srv.getCharacteristic(AT_CH).catch(() => null))) driver = 'atorch';
+  else if ((srv = has(AT_SVC)) && (await srv.getCharacteristic(AT_CH).catch(() => null))) driver = 'ffe0';
   else { driver = 'generic'; return genConnect(svcs); }
-  log('тип пристрою: ' + ({ jbd: 'JBD BMS', fel: 'Felicity Solar', atorch: 'сервіс FFE0 (UART-модуль) — перевіряю, чи це Atorch…' })[driver]);
+  log('тип пристрою: ' + ({ jbd: 'JBD BMS', fel: 'Felicity Solar', ffe0: 'сервіс FFE0 (UART-модуль) — визначаю: JK BMS чи Atorch…' })[driver]);
   if (driver === 'fel') return felConnect(srv);
-  if (driver === 'atorch') return atConnect(srv, svcs);
+  if (driver === 'ffe0') return atConnect(srv, svcs);
   rxCh = await srv.getCharacteristic(RX);
   txCh = await srv.getCharacteristic(TX);
   rxCh.addEventListener('characteristicvaluechanged', onNotify);
@@ -288,12 +289,15 @@ function applyDriverUi() {
   try { applyDriverUi0(); } catch (e) { log('інтерфейс застарів (' + e.message + ') — перезавантажую'); hardReload(); }
 }
 function applyDriverUi0() {
-  const gen = driver === 'generic';
+  const probe = driver === 'ffe0';
+  const gen = driver === 'generic' || probe;
   const at = driver === 'atorch' || gen;
   const jk = driver === 'jk';
   const fel = driver === 'fel' || at || jk;     // «не JBD»: ховаємо EEPROM-функції
-  $('genCard').style.display = gen ? '' : 'none';
+  $('genCard').style.display = driver === 'generic' ? '' : 'none';
   $('genMon').style.display = gen ? '' : 'none';
+  $('genMonT').textContent = probe ? 'Визначаю тип пристрою…' : 'Невідомий пристрій';
+  $('genMonP').textContent = probe ? 'Пристрій має сервіс FFE0: чекаю відповіді JK BMS або Atorch (до 6 с).' : 'Підключено в універсальному режимі. Карта BLE-сервісів, усі вхідні дані і відправка команд — у вкладці «Сервіс».';
   document.querySelector('#monBody .grid2').style.display = fel && !jk ? 'none' : '';
   $('cTitle').closest('.card').style.display = at ? 'none' : '';
   $('prot').closest('.card').style.display = at ? 'none' : '';
@@ -405,7 +409,7 @@ async function atConnect(srv, svcs) {
   renderDevInfo();
   startPoll();   // для Atorch опитування лише перемальовує — дані приходять самі раз на секунду
   setTimeout(async () => {
-    if (driver === 'atorch' && !atLast && !jkSeen && dev?.gatt?.connected) {
+    if (driver === 'ffe0' && dev?.gatt?.connected) {
       log('FFE0 є, але ні Atorch, ні JK не відповіли — переходжу в універсальний режим');
       stopPoll(); driver = 'generic';
       try { await rxCh.stopNotifications(); } catch (_) {}
@@ -434,7 +438,13 @@ function atNotify(e) {
   }
 }
 function atParse(p) {
-  if (!atLast) { log('отримано пакет Atorch — це електронне навантаження Atorch'); }
+  if (driver !== 'ffe0' && driver !== 'atorch') return;
+  if (driver === 'ffe0') {
+    driver = 'atorch';
+    log('отримано пакет Atorch — це електронне навантаження Atorch');
+    $('dName').textContent = dev.name || 'Atorch DL24';
+    applyDriverUi(); renderDevInfo();
+  }
   atDev = p[3];
   atRawHex = hex(p);
   if (atDev !== 0x02) { log('Atorch: тип пристрою 0x' + atDev.toString(16) + ' (очікувався 0x02 DC) — розбір може бути неточним'); }
@@ -514,6 +524,7 @@ function jkNotify(e) {
 const jkStr = (f, a, b) => new TextDecoder().decode(new Uint8Array(f.slice(a, b))).replace(/\0.*$/s, '').trim();
 function jkFrame(f) {
   const type = f[4];
+  if (driver !== 'ffe0' && driver !== 'jk') return;
   if (!jkSeen) {
     jkSeen = true; driver = 'jk';
     log('отримано кадр JK — це JK BMS');
@@ -746,7 +757,7 @@ async function reconnect() {
 }
 function setConn(s) {
   connState = s;
-  setTimeout(renderKnown, 0);
+  if (s === 'off') setTimeout(renderKnown, 0); else if ($('known')) $('known').innerHTML = '';
   $('cDot').className = 'dot' + (s === 'on' ? ' on' : '');
   $('cTxt').textContent = s === 'on' ? 'Підключено' : s === 'conn' ? 'Скасувати' : 'Підключити';
   $('dSub').textContent = s === 'on' ? (driver === 'fel' ? 'SN ' + (felInfo?.DevSN || felRaw?.DevSN || '—') : driver === 'generic' ? 'універсальний режим' : (dev?.id?.slice(0, 17) || '') + (devStrings.hw ? ' · ' + devStrings.hw : '')) : s === 'conn' ? 'підключення… (натисніть, щоб скасувати)' : 'не підключено';
@@ -775,7 +786,7 @@ $('selPoll').onchange = e => { pollMs = +e.target.value; if (pollTimer) startPol
 async function poll() {
   if (!txCh || busy) return;
   try {
-    if (driver === 'generic') return;
+    if (driver === 'generic' || driver === 'ffe0') return;
     if (driver === 'jk') { await jkPoll(); if (!jkLast) return; if (document.querySelector('#v-srv.act')) renderDevInfo(); } else
     if (driver === 'atorch') { if (!atLast) return; } else
     if (driver === 'fel') await felPoll(); else
@@ -808,7 +819,7 @@ const PROT = ['Перезаряд банки', 'Перерозряд банки'
 /* ---------- рендер моніторингу ---------- */
 function renderMon() {
   if (driver === 'atorch') return renderAtorch();
-  if (driver === 'generic') return;
+  if (driver === 'generic' || driver === 'ffe0') return;
   const b = basic; if (!b) return;
   $('mV').textContent = fmt(b.v, 2);
   $('mA').textContent = fmt(b.a, 2) + ' A';
@@ -1289,6 +1300,10 @@ $('bCsv').onclick = () => {
 
 /* ---------- пристрій ---------- */
 function renderDevInfo() {
+  if (driver === 'ffe0') {
+    $('devInfo').innerHTML = `<div class="kv"><span>Bluetooth-ім'я</span><span>${dev?.name || '—'}</span></div><div class="kv"><span>Тип</span><span>визначається…</span></div>`;
+    return;
+  }
   if (driver === 'jk') {
     const i = jkInfo || {};
     $('devInfo').innerHTML = [['Bluetooth-ім\'я', dev?.name], ['Тип', 'JK BMS'], ['Модель', i.model], ['Апаратна версія', i.hw], ['Прошивка', i.sw], ['Ім\'я в BMS', i.name], ['Серійний номер', i.sn], ['Протокол', jkOffs ? 'JK02_24S' : 'JK02_32S'], ['SOH', basic?.soh != null ? basic.soh + ' %' : null], ['Цикли', basic?.cycles]]
@@ -1393,3 +1408,6 @@ window.addEventListener('beforeunload', releaseBt);
 
 $('known').addEventListener('click', e => { const i = e.target.closest('[data-known]')?.dataset.known; if (i != null && knownDevs[+i]) connectKnown(knownDevs[+i]); });
 renderKnown();
+
+try { $('genWide').checked = localStorage.getItem('jbd_wide_probe') === '1'; } catch (_) {}
+$('genWide').onchange = e => { try { localStorage.setItem('jbd_wide_probe', e.target.checked ? '1' : '0'); } catch (_) {} toast(e.target.checked ? 'Розширений список увімкнено — діє з наступного підключення' : 'Розширений список вимкнено'); };

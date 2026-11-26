@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <meta name="theme-color" content="#14181C">
-<meta name="app-ver" content="1.6.1">
+<meta name="app-ver" content="1.6.2">
 <link rel="manifest" href="manifest.webmanifest">
 <link rel="icon" href="icon.svg" type="image/svg+xml">
 <link rel="apple-touch-icon" href="icon-192.png">
@@ -75,7 +75,7 @@ button{font:inherit;cursor:pointer}
 .gh .cnt{font-size:12px;font-weight:600;color:var(--warn);background:var(--warnbg);padding:3px 8px;border-radius:10px}
 .gb{display:none}.grp.open .gb{display:block}
 .pr{display:grid;grid-template-columns:minmax(0,1fr) 96px 96px;gap:8px;padding:8px 14px;align-items:center;border-top:1px solid var(--line)}
-.pr.single{grid-template-columns:minmax(0,1fr) 140px}
+.pr.single{grid-template-columns:minmax(0,1fr) 96px}
 .pr.head{font-size:12px;color:var(--mut);padding-top:6px;padding-bottom:6px}
 .pr .nm{font-size:14px}
 .pr .was{display:block;font-size:12px;color:var(--warn)}
@@ -151,8 +151,8 @@ canvas{width:100%;height:80px;display:block}
     <div class="grid3" id="temps"></div>
 
     <div class="card" id="genMon" style="display:none">
-      <div class="ct">Невідомий пристрій</div>
-      <p class="lbl" style="font-size:14px">Підключено в універсальному режимі. Карта BLE-сервісів, усі вхідні дані і відправка команд — у вкладці «Сервіс».</p>
+      <div class="ct" id="genMonT">Невідомий пристрій</div>
+      <p class="lbl" style="font-size:14px" id="genMonP"></p>
     </div>
 
     <div class="card" id="atCard" style="display:none">
@@ -246,6 +246,7 @@ canvas{width:100%;height:80px;display:block}
       </div>
       <button class="btn pri" id="genSend" style="width:100%;margin-top:8px">Надіслати</button>
       <p class="lbl" style="margin:10px 0 4px">Усі сповіщення від пристрою пишуться в «Протокол обміну» (hex | ascii).</p>
+      <label class="bitrow" style="padding:10px 0;border:0"><span>Розширений список сервісів (~30 UUID) для невідомих пристроїв</span><input type="checkbox" id="genWide"></label>
       <label class="f" for="genUuids">Додаткові UUID сервісів (через кому)</label>
       <input id="genUuids" class="f mono" placeholder="напр. fff0, 0000abcd-0000-1000-8000-00805f9b34fb" autocomplete="off">
       <button class="btn" id="genUuidsSave" style="width:100%;margin-top:8px">Зберегти UUID</button>
@@ -278,6 +279,6 @@ canvas{width:100%;height:80px;display:block}
 <div class="sheetbg" id="sheetBg"><div class="sheet"><div class="grab"></div><div id="sheetC"></div></div></div>
 <div class="toast" id="toast"></div>
 
-<script src="app.js?v=1.6.1"></script>
+<script src="app.js?v=1.6.2"></script>
 </body>
 </html>
