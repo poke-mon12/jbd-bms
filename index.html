@@ -148,6 +148,11 @@ canvas{width:100%;height:80px;display:block}
 
     <div class="grid3" id="temps"></div>
 
+    <div class="card" id="genMon" style="display:none">
+      <div class="ct">Невідомий пристрій</div>
+      <p class="lbl" style="font-size:14px">Підключено в універсальному режимі. Карта BLE-сервісів, усі вхідні дані і відправка команд — у вкладці «Сервіс».</p>
+    </div>
+
     <div class="card" id="atCard" style="display:none">
       <div class="ct"><span>Навантаження Atorch</span></div>
       <div id="atBody" style="margin-top:4px"></div>
@@ -228,13 +233,30 @@ canvas{width:100%;height:80px;display:block}
       <div class="bitrow"><span>Завантажити CSV</span><button class="btn sm" id="bCsv">Завантажити</button></div>
     </div>
 
+    <div class="card" id="genCard" style="display:none">
+      <div class="ct"><span>Універсальний режим</span><small><button class="btn sm" id="genCopy">Копіювати карту</button></small></div>
+      <pre id="genMapBox" style="background:var(--bg);border-radius:10px;padding:10px;font:11px/1.45 ui-monospace,Menlo,monospace;max-height:220px;overflow:auto;white-space:pre-wrap;word-break:break-all;margin:8px 0">—</pre>
+      <label class="f" for="genCh">Характеристика для запису</label>
+      <select id="genCh" class="f" style="width:100%;height:44px;border:1px solid #D5DCE2;border-radius:10px;padding:0 8px;font:inherit;margin-top:4px"></select>
+      <div style="display:flex;gap:8px;margin-top:8px">
+        <select id="genMode" style="height:44px;border:1px solid #D5DCE2;border-radius:10px;padding:0 8px;font:inherit"><option value="hex">hex</option><option value="text">текст</option></select>
+        <input id="genData" class="f mono" style="margin-top:0;flex:1" placeholder="напр. dd a5 03 00 ff fd 77" autocomplete="off">
+      </div>
+      <button class="btn pri" id="genSend" style="width:100%;margin-top:8px">Надіслати</button>
+      <p class="lbl" style="margin:10px 0 4px">Усі сповіщення від пристрою пишуться в «Протокол обміну» (hex | ascii).</p>
+      <label class="f" for="genUuids">Додаткові UUID сервісів (через кому)</label>
+      <input id="genUuids" class="f mono" placeholder="напр. fff0, 0000abcd-0000-1000-8000-00805f9b34fb" autocomplete="off">
+      <button class="btn" id="genUuidsSave" style="width:100%;margin-top:8px">Зберегти UUID</button>
+      <p class="lbl" style="margin-top:6px">Chrome показує лише ті сервіси, UUID яких застосунок назвав заздалегідь. Якщо UUID пристрою відомий (наприклад, з nRF Connect) — додайте його тут і підключіться знову.</p>
+    </div>
+
     <div class="card" id="felRawCard" style="display:none">
       <div class="ct"><span id="felRawTitle">Сирі дані BMS (JSON)</span><small><button class="btn sm" id="bFelCopy">Копіювати</button></small></div>
       <pre id="felRaw" style="background:var(--bg);border-radius:10px;padding:10px;font:11px/1.45 ui-monospace,Menlo,monospace;max-height:300px;overflow:auto;white-space:pre-wrap;word-break:break-all;margin:8px 0 0">—</pre>
     </div>
 
     <div class="card">
-      <div class="ct"><span>Протокол обміну</span><small><button class="btn sm" id="bLogClr">Очистити</button></small></div>
+      <div class="ct"><span>Протокол обміну</span><small style="display:flex;gap:6px"><button class="btn sm" id="bLogCopy">Копіювати</button><button class="btn sm" id="bLogClr">Очистити</button></small></div>
       <label class="bitrow" style="padding:8px 0;border:0"><span>Показувати опитування</span><input type="checkbox" id="logPoll"></label>
       <div id="log"></div>
     </div>

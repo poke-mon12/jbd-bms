@@ -1,6 +1,6 @@
 'use strict';
 /* JBD BMS PWA — Web Bluetooth, протокол JBD (Xiaoxiang) */
-const VERSION = '1.3.0';
+const VERSION = '1.4.0';
 const SVC = 0xff00, RX = 0xff01, TX = 0xff02;
 // Felicity Solar (FLA/FLB/LPBF): текстові команди, відповідь JSON
 const FEL_SVC = '6e6f736a-4643-4d44-8fa9-0fafd005e455';
@@ -11,7 +11,11 @@ let driver = 'jbd';             // 'jbd' | 'fel' | 'atorch'
 const AT_SVC = 0xffe0, AT_CH = 0xffe1;
 let atBuf = [], atDev = 2, atLast = null, atRawHex = '';
 // загальновідомі сервіси, щоб для невідомих пристроїв показати GATT-карту
-const PROBE_SVCS = [0xff00, 0xffe0, 0xfff0, 0xffd0, 0xff10, 0xfee7, 0x180a, 0x180f, '6e400001-b5a3-f393-e0a9-e50e24dcca9e', '0000ff00-0000-1000-8000-00805f9b34fb'];
+const PROBE_SVCS = [0xff00, 0xffe0, 0xffe5, 0xfff0, 0xffd0, 0xffc0, 0xffb0, 0xffa0, 0xff10, 0xff12, 0xfe95, 0xfee0, 0xfee7, 0xfee9, 0xfd00, 0xae00, 0xae30, 0xa002,
+  0x180a, 0x180f, 0x181c, 0x1910,
+  '6e400001-b5a3-f393-e0a9-e50e24dcca9e',   // Nordic UART
+  '0000ffe0-0000-1000-8000-00805f9b34fb', '49535343-fe7d-4ae5-8fa9-9fafd205e455', // Microchip ISSC
+  '0000fe00-0000-1000-8000-00805f9b34fb', '00010203-0405-0607-0809-0a0b0c0d1910'];
 let felBuf = '', felWaiter = null, felRaw = null, felInfo = null;
 const $ = id => document.getElementById(id);
 const hex = a => Array.from(a, b => b.toString(16).padStart(2, '0')).join(' ');
@@ -100,26 +104,55 @@ const exitSave = () => wr(0x01, [0x28, 0x28]);
 let lastPw = '';
 
 /* ---------- підключення ---------- */
+let connState = 'off';          // off | conn | on
+let cancelConn = false;
+function extraUuids() {
+  try { return (localStorage.getItem('jbd_extra_uuids') || '').split(/[\s,;]+/).map(x => x.trim().toLowerCase()).filter(Boolean)
+    .map(x => /^[0-9a-f]{4}$/.test(x) ? parseInt(x, 16) : x).filter(x => typeof x === 'number' || /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(x)); } catch (_) { return []; }
+}
 async function connect() {
   if (!navigator.bluetooth) { toast('Web Bluetooth недоступний. Відкрийте в Chrome на Android.', 4000); return; }
+  cancelConn = false;
   try {
-    dev = await navigator.bluetooth.requestDevice({ acceptAllDevices: true, optionalServices: [...new Set([SVC, FEL_SVC, AT_SVC, ...PROBE_SVCS])] });
+    dev = await navigator.bluetooth.requestDevice({ acceptAllDevices: true, optionalServices: [...new Set([SVC, FEL_SVC, AT_SVC, ...PROBE_SVCS, ...extraUuids()])] });
     dev.addEventListener('gattserverdisconnected', onDisc);
     setConn('conn');
     await gattConnect();
-  } catch (e) { setConn('off'); log('помилка: ' + e.message); if (e.name !== 'NotFoundError') toast(e.message); }
+  } catch (e) {
+    if (cancelConn) { log('підключення скасовано'); setConn('off'); return; }
+    setConn('off'); log('помилка: ' + e.message); if (e.name !== 'NotFoundError') toast(e.message);
+    try { if (dev?.gatt?.connected) { manualDisc = true; dev.gatt.disconnect(); } } catch (_) {}
+  }
 }
+// список доступних сервісів; якщо пристрій рве зв'язок — одна повторна спроба
+async function listServices(gatt) {
+  for (let i = 0; i < 2; i++) {
+    try {
+      if (!dev.gatt.connected) gatt = await dev.gatt.connect();
+      return { gatt, svcs: await gatt.getPrimaryServices() };
+    } catch (e) {
+      if (/No Services/i.test(e.message)) return { gatt, svcs: [] };
+      log('читання сервісів: ' + e.message + (i ? '' : ' — повторюю'));
+      if (cancelConn) throw new Error('скасовано');
+      await sleep(800);
+    }
+  }
+  return { gatt, svcs: [] };
+}
+const shortU = u => { const m = /^0000([0-9a-f]{4})-0000-1000-8000-00805f9b34fb$/.exec(u); return m ? m[1] : u; };
 async function gattConnect() {
-  const gatt = await dev.gatt.connect();
+  let gatt = await dev.gatt.connect();
+  if (cancelConn) throw new Error('скасовано');
+  const r = await listServices(gatt); gatt = r.gatt;
+  const svcs = r.svcs, has = u => svcs.find(s => shortU(s.uuid) === (typeof u === 'number' ? u.toString(16).padStart(4, '0') : u));
   let srv = null;
-  const tryS = async u => { try { return await gatt.getPrimaryService(u); } catch (_) { return null; } };
-  if ((srv = await tryS(SVC))) driver = 'jbd';
-  else if ((srv = await tryS(FEL_SVC))) driver = 'fel';
-  else if ((srv = await tryS(AT_SVC)) && (await srv.getCharacteristic(AT_CH).catch(() => null))) driver = 'atorch';
-  else { await dumpGatt(gatt); throw new Error('Невідомий пристрій — карту його BLE-сервісів записано в «Протокол обміну» (Сервіс)'); }
+  if ((srv = has(SVC))) driver = 'jbd';
+  else if ((srv = has(FEL_SVC))) driver = 'fel';
+  else if ((srv = has(AT_SVC)) && (await srv.getCharacteristic(AT_CH).catch(() => null))) driver = 'atorch';
+  else { driver = 'generic'; return genConnect(svcs); }
   log('тип пристрою: ' + ({ jbd: 'JBD BMS', fel: 'Felicity Solar', atorch: 'Atorch DL24 (навантаження)' })[driver]);
   if (driver === 'fel') return felConnect(srv);
-  if (driver === 'atorch') return atConnect(srv);
+  if (driver === 'atorch') return atConnect(srv, svcs);
   rxCh = await srv.getCharacteristic(RX);
   txCh = await srv.getCharacteristic(TX);
   rxCh.addEventListener('characteristicvaluechanged', onNotify);
@@ -136,6 +169,7 @@ async function gattConnect() {
   renderDevInfo();
   startPoll();
 }
+
 /* ---------- Felicity ---------- */
 async function felConnect(srv) {
   rxCh = await srv.getCharacteristic(FEL_RX);
@@ -225,23 +259,27 @@ async function felPoll() {
   if (document.querySelector('#v-srv.act')) renderDevInfo();
 }
 function applyDriverUi() {
-  const at = driver === 'atorch';
+  const gen = driver === 'generic';
+  const at = driver === 'atorch' || gen;
   const fel = driver === 'fel' || at;     // «не JBD»: ховаємо EEPROM-функції
+  $('genCard').style.display = gen ? '' : 'none';
+  $('genMon').style.display = gen ? '' : 'none';
   document.querySelector('#monBody .grid2').style.display = fel ? 'none' : '';
   $('cTitle').closest('.card').style.display = at ? 'none' : '';
   $('prot').closest('.card').style.display = at ? 'none' : '';
-  $('atCard').style.display = at ? '' : 'none';
+  $('atCard').style.display = driver === 'atorch' ? '' : 'none';
+  $('temps').closest('.wrap').querySelectorAll('.card').forEach(c => { if (c.querySelector('#chV')) c.style.display = gen ? 'none' : ''; });
   $('felRawTitle').textContent = at ? 'Сирий пакет Atorch (hex)' : 'Сирі дані BMS (JSON)';
   ['bBackup', 'bRestore', 'bCalZero', 'bCalCell', 'bCnt'].forEach(id => $(id).disabled = fel);
   [$('bBackup').closest('.card'), $('bCalZero').closest('.card')].forEach(c => c.style.display = fel ? 'none' : '');
   $('bCnt').closest('.bitrow').style.display = fel ? 'none' : '';
   $('pFilt').style.display = fel ? 'none' : '';
-  $('felRawCard').style.display = fel ? '' : 'none';
+  $('felRawCard').style.display = fel && !gen ? '' : 'none';
   if (driver !== 'fel') $('limCard').style.display = 'none';
   if (!at) $('temps').style.display = '';
   if (fel) {
     if (at) {
-      $('pInfo').textContent = 'Atorch DL24: параметрів EEPROM немає';
+      $('pInfo').textContent = gen ? 'Невідомий пристрій: параметрів немає' : 'Atorch DL24: параметрів EEPROM немає';
       $('pBody').innerHTML = '<div class="card"><div class="ct">Atorch DL24</div><p class="lbl" style="font-size:14px">Керування навантаженням — кнопками на вкладці «Моніторинг» (як кнопки на самому приладі). Сирий пакет — у «Сервісі».</p></div>';
       $('bReadP').disabled = true;
     } else {
@@ -255,29 +293,67 @@ function renderFelRaw() {
   $('felRaw').textContent = felRaw ? JSON.stringify(felRaw, null, 1) : '—';
 }
 
-/* ---------- невідомий пристрій: GATT-карта ---------- */
-async function dumpGatt(gatt) {
-  const lines = ['GATT-карта ' + (dev.name || dev.id) + ':'];
-  try {
-    const svcs = await gatt.getPrimaryServices();
-    if (!svcs.length) lines.push('  (жодного з відомих сервісів не знайдено)');
-    for (const s of svcs) {
-      lines.push('  сервіс ' + s.uuid);
-      try {
-        for (const c of await s.getCharacteristics()) {
-          const p = c.properties, pr = ['read', 'write', 'writeWithoutResponse', 'notify', 'indicate'].filter(k => p[k]).join(',');
-          lines.push('    хар. ' + c.uuid + ' [' + pr + ']');
-        }
-      } catch (e) { lines.push('    (характеристики недоступні: ' + e.message + ')'); }
+/* ---------- універсальний режим (невідомий пристрій) ---------- */
+let genChars = [], genMap = [];
+const PROPS = ['read', 'write', 'writeWithoutResponse', 'notify', 'indicate'];
+const asciiOf = a => Array.from(a, b => b >= 32 && b < 127 ? String.fromCharCode(b) : '.').join('');
+async function genConnect(svcs) {
+  genChars = []; genMap = ['GATT-карта ' + (dev.name || dev.id) + ':'];
+  if (!svcs.length) genMap.push('  жодного з відомих застосунку сервісів не знайдено — додайте UUID у «Сервіс → Універсальний режим»');
+  for (const sv of svcs) {
+    genMap.push('  сервіс ' + sv.uuid);
+    let chars = [];
+    try { chars = await sv.getCharacteristics(); } catch (e) { genMap.push('    (характеристики недоступні: ' + e.message + ')'); }
+    for (const c of chars) {
+      const pr = PROPS.filter(k => c.properties[k]);
+      genMap.push('    хар. ' + c.uuid + ' [' + pr.join(',') + ']');
+      genChars.push({ svc: sv.uuid, ch: c, props: pr });
     }
-  } catch (e) { lines.push('  помилка: ' + e.message); }
-  lines.push('  Примітка: Web Bluetooth показує лише сервіси з переліку, відомого застосунку.');
-  lines.reverse().forEach(l => log(l));
-  try { dev.gatt.disconnect(); } catch (_) {}
+  }
+  genMap.forEach(l => log(l));
+  $('dName').textContent = dev.name || 'Невідомий пристрій';
+  setConn('on');
+  applyDriverUi();
+  renderGen();
+  // підписка на всі notify/indicate — усе, що прийде, видно в журналі
+  for (const g of genChars) if (g.props.includes('notify') || g.props.includes('indicate')) {
+    try {
+      g.ch.addEventListener('characteristicvaluechanged', e => { const d = new Uint8Array(e.target.value.buffer); log('← [' + shortU(g.ch.uuid) + '] ' + hex(d) + '  |' + asciiOf(d) + '|'); });
+      await g.ch.startNotifications();
+      log('підписано на ' + shortU(g.ch.uuid));
+    } catch (e) { log('підписка ' + shortU(g.ch.uuid) + ': ' + e.message); }
+  }
+  // характеристики з read — прочитати один раз
+  for (const g of genChars) if (g.props.includes('read')) {
+    try { const v = new Uint8Array((await g.ch.readValue()).buffer); log('читання [' + shortU(g.ch.uuid) + '] ' + hex(v) + '  |' + asciiOf(v) + '|'); } catch (_) {}
+  }
+  txCh = genChars.find(g => g.props.includes('write') || g.props.includes('writeWithoutResponse'))?.ch || { generic: true };
+}
+function renderGen() {
+  const w = genChars.filter(g => g.props.includes('write') || g.props.includes('writeWithoutResponse'));
+  $('genCh').innerHTML = w.length ? w.map((g, i) => `<option value="${genChars.indexOf(g)}">${shortU(g.ch.uuid)} (${g.props.filter(p => p.startsWith('write')).join('/')})</option>`).join('') : '<option value="">немає характеристик на запис</option>';
+  $('genSend').disabled = !w.length;
+  $('genMapBox').textContent = genMap.join('\n');
+}
+async function genSend() {
+  const g = genChars[+$('genCh').value]; if (!g) return;
+  const raw = $('genData').value.trim(); if (!raw) return;
+  let bytes;
+  if ($('genMode').value === 'hex') {
+    const h = raw.replace(/0x/gi, '').replace(/[^0-9a-f]/gi, '');
+    if (!h.length || h.length % 2) return toast('Hex: парна кількість символів 0-9 a-f');
+    bytes = new Uint8Array(h.match(/../g).map(x => parseInt(x, 16)));
+  } else bytes = new TextEncoder().encode(raw.replace(/\\r/g, '\r').replace(/\\n/g, '\n'));
+  log('→ [' + shortU(g.ch.uuid) + '] ' + hex(bytes) + '  |' + asciiOf(bytes) + '|');
+  try {
+    if (g.props.includes('write')) await g.ch.writeValueWithResponse(bytes); else await g.ch.writeValueWithoutResponse(bytes);
+  } catch (e) { toast(e.message); log('запис: ' + e.message); }
 }
 
 /* ---------- Atorch DL24 ---------- */
-async function atConnect(srv) {
+let svcsAll = null;
+async function atConnect(srv, svcs) {
+  svcsAll = svcs;
   const ch = await srv.getCharacteristic(AT_CH);
   rxCh = ch; txCh = ch; atBuf = [];
   ch.addEventListener('characteristicvaluechanged', atNotify);
@@ -288,6 +364,15 @@ async function atConnect(srv) {
   applyDriverUi();
   renderDevInfo();
   startPoll();   // для Atorch опитування лише перемальовує — дані приходять самі раз на секунду
+  setTimeout(async () => {
+    if (driver === 'atorch' && !atLast && dev?.gatt?.connected) {
+      log('FFE0 є, але пакетів Atorch немає — переходжу в універсальний режим');
+      stopPoll(); driver = 'generic';
+      try { await rxCh.stopNotifications(); } catch (_) {}
+      rxCh.removeEventListener('characteristicvaluechanged', atNotify);
+      await genConnect(svcsAll || []);
+    }
+  }, 6000);
 }
 const u24 = (d, i) => (d[i] << 16) | (d[i + 1] << 8) | d[i + 2];
 const u32 = (d, i) => ((d[i] << 24) >>> 0) + (d[i + 1] << 16) + (d[i + 2] << 8) + d[i + 3];
@@ -357,29 +442,43 @@ function renderAtorch() {
 
 let manualDisc = false;
 function onDisc() {
+  const wasOn = connState === 'on';
   txCh = rxCh = null; stopPoll(); setConn('off');
   if (waiter) { clearTimeout(waiter.t); waiter = null; }
-  if (!manualDisc && dev) { log('зв\'язок втрачено, перепідключення…'); reconnect(); }
+  if (felWaiter) { clearTimeout(felWaiter.t); felWaiter = null; }
+  if (!manualDisc && !cancelConn && dev && wasOn && driver !== 'generic') { log('зв\'язок втрачено, перепідключення…'); reconnect(); }
+  else if (!manualDisc && driver === 'generic') log('пристрій розірвав з\'єднання');
   manualDisc = false;
 }
 async function reconnect() {
-  for (let i = 0; i < 5 && dev && !txCh; i++) {
+  for (let i = 0; i < 5 && dev && !txCh && !cancelConn; i++) {
     setConn('conn'); await sleep(1500 * (i + 1));
+    if (cancelConn) break;
     try { await gattConnect(); return; } catch (e) { log('спроба ' + (i + 1) + ': ' + e.message); }
   }
   setConn('off');
 }
 function setConn(s) {
+  connState = s;
   $('cDot').className = 'dot' + (s === 'on' ? ' on' : '');
-  $('cTxt').textContent = s === 'on' ? 'Підключено' : s === 'conn' ? 'Підключення…' : 'Підключити';
-  $('dSub').textContent = s === 'on' ? (driver === 'fel' ? 'SN ' + (felInfo?.DevSN || felRaw?.DevSN || '—') : (dev?.id?.slice(0, 17) || '') + (devStrings.hw ? ' · ' + devStrings.hw : '')) : 'не підключено';
+  $('cTxt').textContent = s === 'on' ? 'Підключено' : s === 'conn' ? 'Скасувати' : 'Підключити';
+  $('dSub').textContent = s === 'on' ? (driver === 'fel' ? 'SN ' + (felInfo?.DevSN || felRaw?.DevSN || '—') : driver === 'generic' ? 'універсальний режим' : (dev?.id?.slice(0, 17) || '') + (devStrings.hw ? ' · ' + devStrings.hw : '')) : s === 'conn' ? 'підключення… (натисніть, щоб скасувати)' : 'не підключено';
   $('swChg').disabled = $('swDsg').disabled = s !== 'on';
 }
+// кнопка-тригер: Підключити → (Скасувати під час підключення) → Відключити
 $('bConn').onclick = async () => {
-  if (txCh) {
-    const ok = await sheetConfirm('Відключитися?', '<p>З\'єднання з BMS буде закрито.</p>', 'Відключити');
-    if (ok) { manualDisc = true; dev.gatt.disconnect(); }
-  } else connect();
+  if (connState === 'conn') {
+    cancelConn = true;
+    try { dev?.gatt?.disconnect(); } catch (_) {}
+    setConn('off'); log('підключення скасовано');
+    return;
+  }
+  if (connState === 'on') {
+    const ok = await sheetConfirm('Відключитися?', '<p>З\'єднання з пристроєм буде закрито.</p>', 'Відключити');
+    if (ok) { manualDisc = true; cancelConn = true; try { dev.gatt.disconnect(); } catch (_) {} setConn('off'); }
+    return;
+  }
+  connect();
 };
 
 /* ---------- опитування ---------- */
@@ -389,6 +488,7 @@ $('selPoll').onchange = e => { pollMs = +e.target.value; if (pollTimer) startPol
 async function poll() {
   if (!txCh || busy) return;
   try {
+    if (driver === 'generic') return;
     if (driver === 'atorch') { if (!atLast) return; } else
     if (driver === 'fel') await felPoll(); else
     await exclusive(async () => {
@@ -420,6 +520,7 @@ const PROT = ['Перезаряд банки', 'Переразряд банки'
 /* ---------- рендер моніторингу ---------- */
 function renderMon() {
   if (driver === 'atorch') return renderAtorch();
+  if (driver === 'generic') return;
   const b = basic; if (!b) return;
   $('mV').textContent = fmt(b.v, 2);
   $('mA').textContent = fmt(b.a, 2) + ' A';
@@ -892,6 +993,10 @@ $('bCsv').onclick = () => {
 
 /* ---------- пристрій ---------- */
 function renderDevInfo() {
+  if (driver === 'generic') {
+    $('devInfo').innerHTML = `<div class="kv"><span>Bluetooth-ім'я</span><span>${dev?.name || '—'}</span></div><div class="kv"><span>Тип</span><span>невідомий (універсальний режим)</span></div><div class="kv"><span>Сервісів знайдено</span><span>${new Set(genChars.map(g => g.svc)).size}</span></div>`;
+    return;
+  }
   if (driver === 'atorch') {
     $('devInfo').innerHTML = [['Bluetooth-ім\'я', dev?.name], ['Тип', 'Atorch DL24 (електронне навантаження)'], ['Код типу в пакеті', '0x' + (atDev || 0).toString(16).padStart(2, '0') + (atDev === 2 ? ' (DC)' : '')]]
       .map(r => `<div class="kv"><span>${r[0]}</span><span>${r[1] ?? '—'}</span></div>`).join('');
@@ -955,3 +1060,10 @@ $('atCard').addEventListener('click', async e => {
   if (k === 'resetAll' && !(await sheetConfirm('Скинути всі лічильники?', '<p>Ah, Wh і час роботи на навантаженні буде обнулено.</p>', 'Скинути'))) return;
   try { await atCmd(AT_CMDS[k]); setTimeout(() => renderMon(), 1200); } catch (er) { toast(er.message); }
 });
+
+/* ---------- універсальний режим: UI ---------- */
+$('genSend').onclick = genSend;
+$('genCopy').onclick = async () => { try { await navigator.clipboard.writeText(genMap.join('\n')); toast('Скопійовано'); } catch (_) { toast('Не вдалося скопіювати'); } };
+try { $('genUuids').value = localStorage.getItem('jbd_extra_uuids') || ''; } catch (_) {}
+$('genUuidsSave').onclick = () => { try { localStorage.setItem('jbd_extra_uuids', $('genUuids').value.trim()); toast('Збережено. Діє з наступного підключення'); } catch (_) { toast('Не вдалося зберегти'); } };
+$('bLogCopy').onclick = async () => { try { await navigator.clipboard.writeText(logLines.join('\n')); toast('Журнал скопійовано'); } catch (_) { toast('Не вдалося скопіювати'); } };
