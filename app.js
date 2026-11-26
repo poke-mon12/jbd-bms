@@ -1,6 +1,6 @@
 'use strict';
 /* JBD BMS PWA — Web Bluetooth, протокол JBD (Xiaoxiang) */
-const VERSION = '1.4.0';
+const VERSION = '1.4.2';
 const SVC = 0xff00, RX = 0xff01, TX = 0xff02;
 // Felicity Solar (FLA/FLB/LPBF): текстові команди, відповідь JSON
 const FEL_SVC = '6e6f736a-4643-4d44-8fa9-0fafd005e455';
@@ -113,6 +113,8 @@ function extraUuids() {
 async function connect() {
   if (!navigator.bluetooth) { toast('Web Bluetooth недоступний. Відкрийте в Chrome на Android.', 4000); return; }
   cancelConn = false;
+  // стара сесія могла лишити GATT-з'єднання: підключений пристрій не рекламує себе і не з'являється у списку
+  try { if (dev?.gatt?.connected) { manualDisc = true; dev.gatt.disconnect(); await sleep(300); } } catch (_) {}
   try {
     dev = await navigator.bluetooth.requestDevice({ acceptAllDevices: true, optionalServices: [...new Set([SVC, FEL_SVC, AT_SVC, ...PROBE_SVCS, ...extraUuids()])] });
     dev.addEventListener('gattserverdisconnected', onDisc);
@@ -150,7 +152,7 @@ async function gattConnect() {
   else if ((srv = has(FEL_SVC))) driver = 'fel';
   else if ((srv = has(AT_SVC)) && (await srv.getCharacteristic(AT_CH).catch(() => null))) driver = 'atorch';
   else { driver = 'generic'; return genConnect(svcs); }
-  log('тип пристрою: ' + ({ jbd: 'JBD BMS', fel: 'Felicity Solar', atorch: 'Atorch DL24 (навантаження)' })[driver]);
+  log('тип пристрою: ' + ({ jbd: 'JBD BMS', fel: 'Felicity Solar', atorch: 'сервіс FFE0 (UART-модуль) — перевіряю, чи це Atorch…' })[driver]);
   if (driver === 'fel') return felConnect(srv);
   if (driver === 'atorch') return atConnect(srv, svcs);
   rxCh = await srv.getCharacteristic(RX);
@@ -259,6 +261,9 @@ async function felPoll() {
   if (document.querySelector('#v-srv.act')) renderDevInfo();
 }
 function applyDriverUi() {
+  try { applyDriverUi0(); } catch (e) { log('інтерфейс застарів (' + e.message + ') — перезавантажую'); hardReload(); }
+}
+function applyDriverUi0() {
   const gen = driver === 'generic';
   const at = driver === 'atorch' || gen;
   const fel = driver === 'fel' || at;     // «не JBD»: ховаємо EEPROM-функції
@@ -372,6 +377,7 @@ async function atConnect(srv, svcs) {
       rxCh.removeEventListener('characteristicvaluechanged', atNotify);
       await genConnect(svcsAll || []);
     }
+    renderDevInfo();
   }, 6000);
 }
 const u24 = (d, i) => (d[i] << 16) | (d[i + 1] << 8) | d[i + 2];
@@ -392,6 +398,7 @@ function atNotify(e) {
   }
 }
 function atParse(p) {
+  if (!atLast) { log('отримано пакет Atorch — це електронне навантаження Atorch'); }
   atDev = p[3];
   atRawHex = hex(p);
   if (atDev !== 0x02) { log('Atorch: тип пристрою 0x' + atDev.toString(16) + ' (очікувався 0x02 DC) — розбір може бути неточним'); }
@@ -998,7 +1005,7 @@ function renderDevInfo() {
     return;
   }
   if (driver === 'atorch') {
-    $('devInfo').innerHTML = [['Bluetooth-ім\'я', dev?.name], ['Тип', 'Atorch DL24 (електронне навантаження)'], ['Код типу в пакеті', '0x' + (atDev || 0).toString(16).padStart(2, '0') + (atDev === 2 ? ' (DC)' : '')]]
+    $('devInfo').innerHTML = [['Bluetooth-ім\'я', dev?.name], ['Тип', atLast ? 'Atorch DL24 (електронне навантаження)' : 'визначається… (є сервіс FFE0, чекаю пакет Atorch)'], ['Код типу в пакеті', atLast ? '0x' + (atDev || 0).toString(16).padStart(2, '0') + (atDev === 2 ? ' (DC)' : '') : '—']]
       .map(r => `<div class="kv"><span>${r[0]}</span><span>${r[1] ?? '—'}</span></div>`).join('');
     $('felRaw').textContent = atRawHex || '—';
     return;
@@ -1067,3 +1074,22 @@ $('genCopy').onclick = async () => { try { await navigator.clipboard.writeText(g
 try { $('genUuids').value = localStorage.getItem('jbd_extra_uuids') || ''; } catch (_) {}
 $('genUuidsSave').onclick = () => { try { localStorage.setItem('jbd_extra_uuids', $('genUuids').value.trim()); toast('Збережено. Діє з наступного підключення'); } catch (_) { toast('Не вдалося зберегти'); } };
 $('bLogCopy').onclick = async () => { try { await navigator.clipboard.writeText(logLines.join('\n')); toast('Журнал скопійовано'); } catch (_) { toast('Не вдалося скопіювати'); } };
+
+/* ---------- захист від змішаних версій (стара index.html + новий app.js) ---------- */
+async function hardReload() {
+  try { sessionStorage.setItem('jbd_reloaded', VERSION); } catch (_) {}
+  try { for (const k of await caches.keys()) await caches.delete(k); } catch (_) {}
+  location.reload();
+}
+(() => {
+  const pageVer = document.querySelector('meta[name="app-ver"]')?.content;
+  let done = null; try { done = sessionStorage.getItem('jbd_reloaded'); } catch (_) {}
+  if (pageVer !== VERSION && done !== VERSION) { log('версії не збігаються: сторінка ' + (pageVer || '?') + ', код ' + VERSION + ' — оновлюю'); hardReload(); }
+})();
+
+/* ---------- звільняти Bluetooth при закритті/згортанні сторінки ---------- */
+function releaseBt() {
+  try { if (dev?.gatt?.connected) { manualDisc = true; cancelConn = true; stopPoll(); dev.gatt.disconnect(); } } catch (_) {}
+}
+window.addEventListener('pagehide', releaseBt);
+window.addEventListener('beforeunload', releaseBt);
