@@ -1,6 +1,6 @@
 'use strict';
 /* JBD BMS PWA — Web Bluetooth, протокол JBD (Xiaoxiang) */
-const VERSION = '1.5.0';
+const VERSION = '1.6.0';
 const SVC = 0xff00, RX = 0xff01, TX = 0xff02;
 // Felicity Solar (FLA/FLB/LPBF): текстові команди, відповідь JSON
 const FEL_SVC = '6e6f736a-4643-4d44-8fa9-0fafd005e455';
@@ -109,6 +109,30 @@ let cancelConn = false;
 function extraUuids() {
   try { return (localStorage.getItem('jbd_extra_uuids') || '').split(/[\s,;]+/).map(x => x.trim().toLowerCase()).filter(Boolean)
     .map(x => /^[0-9a-f]{4}$/.test(x) ? parseInt(x, 16) : x).filter(x => typeof x === 'number' || /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(x)); } catch (_) { return []; }
+}
+// підключення до вже дозволеного пристрою без сканування (якщо Chrome підтримує getDevices)
+async function renderKnown() {
+  const box = $('known'); if (!box) return;
+  let list = [];
+  try { if (navigator.bluetooth?.getDevices) list = await navigator.bluetooth.getDevices(); } catch (_) {}
+  knownDevs = list;
+  box.innerHTML = connState === 'off' && list.length ? '<span class="dsub">Швидке підключення:</span>' + list.map((d, i) => `<button class="pill" data-known="${i}" style="height:32px;margin:6px 6px 0 0">${(d.name || d.id).replace(/</g, '&lt;')}</button>`).join('') : '';
+}
+let knownDevs = [];
+async function connectKnown(d) {
+  cancelConn = false;
+  try { if (dev?.gatt?.connected) { manualDisc = true; dev.gatt.disconnect(); await sleep(300); } } catch (_) {}
+  dev = d;
+  dev.removeEventListener?.('gattserverdisconnected', onDisc);
+  dev.addEventListener('gattserverdisconnected', onDisc);
+  setConn('conn');
+  log('швидке підключення: ' + (d.name || d.id));
+  try { await gattConnect(); }
+  catch (e) {
+    if (cancelConn) { setConn('off'); return; }
+    setConn('off'); log('помилка: ' + e.message);
+    toast('Не вдалося без сканування — пристрій поза зоною або вже підключений. Спробуйте «Підключити».', 5000);
+  }
 }
 async function connect() {
   if (!navigator.bluetooth) { toast('Web Bluetooth недоступний. Відкрийте в Chrome на Android.', 4000); return; }
@@ -286,9 +310,9 @@ function applyDriverUi0() {
   if (!at) $('temps').style.display = '';
   if (fel) {
     if (jk) {
-      $('pInfo').textContent = 'JK BMS: зміна параметрів ще не підтримується';
-      $('pBody').innerHTML = '<div class="card"><div class="ct">JK BMS</div><p class="lbl" style="font-size:14px">Моніторинг працює. Перемикачі MOS і налаштування JK — наступним кроком, після звірки даних з вашою BMS.</p></div>';
-      $('bReadP').disabled = true;
+      $('pInfo').textContent = 'JK BMS';
+      $('bReadP').disabled = false;
+      renderJkParams();
     } else if (at) {
       $('pInfo').textContent = gen ? 'Невідомий пристрій: параметрів немає' : 'Atorch DL24: параметрів EEPROM немає';
       $('pBody').innerHTML = '<div class="card"><div class="ct">Atorch DL24</div><p class="lbl" style="font-size:14px">Керування навантаженням — кнопками на вкладці «Моніторинг» (як кнопки на самому приладі). Сирий пакет — у «Сервісі».</p></div>';
@@ -369,7 +393,7 @@ async function atConnect(srv, svcs) {
   rxCh = ch; txCh = ch; atBuf = [];
   ch.addEventListener('characteristicvaluechanged', atNotify);
   ch.addEventListener('characteristicvaluechanged', jkNotify);
-  jkBuf = []; jkLast = 0; jkInfo = null; jkSeen = false;
+  jkBuf = []; jkLast = 0; jkInfo = null; jkSeen = false; jkInfoLogged = false; jkSet = null; jkSettings = null; jkEdits = {}; jkSane = false;
   await ch.startNotifications();
   $('dName').textContent = dev.name || 'FFE0';
   // JK BMS відповідає лише на запит: просимо інформацію про пристрій (0x97), потім дані банок (0x96)
@@ -461,6 +485,7 @@ function renderAtorch() {
 
 
 /* ---------- JK BMS (JK02, BLE FFE0/FFE1) ---------- */
+let jkInfoLogged = false;
 let jkBuf = [], jkLast = 0, jkInfo = null, jkSeen = false, jkSw = 0, jkOffs = 0, jkRaw = null, jkSettings = null;
 const JK_HDR = [0x55, 0xaa, 0xeb, 0x90], JK_LEN = 300;
 const le = (d, i, n, signed) => { let v = 0; for (let k = n - 1; k >= 0; k--) v = v * 256 + d[i + k]; if (signed && v >= 2 ** (8 * n - 1)) v -= 2 ** (8 * n); return v; };
@@ -499,11 +524,18 @@ function jkFrame(f) {
     jkInfo = { model: jkStr(f, 6, 22), hw: jkStr(f, 22, 30), sw: jkStr(f, 30, 38), name: jkStr(f, 46, 62), sn: jkStr(f, 86, 94) };
     jkSw = parseInt(jkInfo.sw) || 0;
     jkOffs = jkSw && jkSw < 11 ? -32 : 0;
-    log('JK: ' + jkInfo.model + ', hw ' + jkInfo.hw + ', sw ' + jkInfo.sw + (jkOffs ? ' (протокол JK02_24S)' : ' (протокол JK02_32S)'));
+    if (!jkInfoLogged) log('JK: ' + jkInfo.model + ', hw ' + jkInfo.hw + ', sw ' + jkInfo.sw + (jkOffs ? ' (протокол JK02_24S)' : ' (протокол JK02_32S)'));
+    jkInfoLogged = true;
     renderDevInfo(); setConn('on');
     return;
   }
-  if (type === 0x01) { jkSettings = f; return; }
+  if (type === 0x01) {
+    jkSettings = f; jkSetAt = Date.now();
+    jkParse(f);
+    if (document.querySelector('#v-par.act')) renderJkParams();
+    if (jkSetWaiter) { const w = jkSetWaiter; jkSetWaiter = null; w(); }
+    return;
+  }
   if (type !== 0x02) return;
   jkLast = Date.now(); jkRaw = f;
   const o = jkOffs, h = o >> 1;
@@ -513,7 +545,7 @@ function jkFrame(f) {
   const tpos = jkSw >= 14 ? [144, 162, 164, 254, 256, 258] : jkSw >= 11 || !jkSw ? [144, 162, 164, 254] : [130, 132, 134];
   const tmask = f[214 + o];
   const temps = [], tnames = [];
-  tpos.forEach((p, i) => { if (tmask & (1 << i)) { const t = le(f, p, 2, true); if (t !== -2000) { temps.push(t / 10); tnames.push(i === 0 || i === 3 ? 'MOS' : 'T' + (i === 1 ? 1 : i === 2 ? 2 : i - 1)); } } });
+  tpos.forEach((p, i) => { if (tmask & (1 << i)) { const t = le(f, p, 2, true); if (t !== -2000) { temps.push(t / 10); tnames.push(i === 0 ? 'MOS' : i === 3 ? 'MOS 2' : 'T' + (i === 1 ? 1 : i === 2 ? 2 : i - 1)); } } });
   const prob = le(f, 166 + o, 4);
   basic = {
     jk: true,
@@ -529,6 +561,163 @@ function jkFrame(f) {
 }
 async function jkPoll() {
   if (Date.now() - jkLast > 4000) await jkSend(0x96);   // якщо BMS не шле дані сама — просимо
+}
+
+
+/* ---------- JK: налаштування (кадр 0x01) і запис ---------- */
+// Регістр запису = (зсув у кадрі − 6) / 4 + 1; значення — 4 байти little-endian
+let jkSet = null, jkEdits = {}, jkSetAt = 0, jkSetWaiter = null, jkSane = false;
+const JKP = [
+  // [reg, key, група, назва, тип, масштаб, знаків, мін, макс, пара]
+  [0x04, 'ovp', 'cell', 'Перезаряд банки', 'v', 0.001, 3, 2, 4.6, 'ovpr'],
+  [0x05, 'ovpr', 'cell', null, 'v', 0.001, 3, 2, 4.6],
+  [0x02, 'uvp', 'cell', 'Переразряд банки', 'v', 0.001, 3, 1.5, 4.2, 'uvpr'],
+  [0x03, 'uvpr', 'cell', null, 'v', 0.001, 3, 1.5, 4.2],
+  [0x0b, 'poff', 'cell', 'Вимкнення BMS', 'v', 0.001, 3, 1.5, 4],
+  [0x01, 'sleep', 'cell', 'Напруга сну', 'v', 0.001, 3, 1.5, 4.5],
+  [0x09, 'rcv', 'cell', 'Напруга заряду (RCV)', 'v', 0.001, 3, 2, 4.6],
+  [0x0a, 'rfv', 'cell', 'Напруга підтримки (RFV)', 'v', 0.001, 3, 2, 4.6],
+  [0x07, 'soc100', 'cell', 'SOC 100 %', 'v', 0.001, 3, 2, 4.6],
+  [0x08, 'soc0', 'cell', 'SOC 0 %', 'v', 0.001, 3, 1.5, 4.2],
+  [0x0c, 'chgoc', 'cur', 'Макс. струм заряду', 'v', 0.001, 1, 0.1, 600],
+  [0x0d, 'chgocd', 'cur', 'Затримка OCP заряду', 'i', 1, 0, 0, 3600, null, 'с'],
+  [0x0e, 'chgocr', 'cur', 'Відновлення OCP заряду', 'i', 1, 0, 0, 3600, null, 'с'],
+  [0x0f, 'dsgoc', 'cur', 'Макс. струм розряду', 'v', 0.001, 1, 0.1, 600],
+  [0x10, 'dsgocd', 'cur', 'Затримка OCP розряду', 'i', 1, 0, 0, 3600, null, 'с'],
+  [0x11, 'dsgocr', 'cur', 'Відновлення OCP розряду', 'i', 1, 0, 0, 3600, null, 'с'],
+  [0x21, 'scpd', 'cur', 'Затримка КЗ', 'i', 1, 0, 0, 100000, null, 'мкс'],
+  [0x12, 'scpr', 'cur', 'Відновлення після КЗ', 'i', 1, 0, 0, 3600, null, 'с'],
+  [0x14, 'cot', 'temp', 'Заряд: перегрів', 't', 0.1, 1, -40, 120, 'cotr'],
+  [0x15, 'cotr', 'temp', null, 't', 0.1, 1, -40, 120],
+  [0x18, 'cut', 'temp', 'Заряд: холод', 't', 0.1, 1, -40, 120, 'cutr'],
+  [0x19, 'cutr', 'temp', null, 't', 0.1, 1, -40, 120],
+  [0x16, 'dot', 'temp', 'Розряд: перегрів', 't', 0.1, 1, -40, 120, 'dotr'],
+  [0x17, 'dotr', 'temp', null, 't', 0.1, 1, -40, 120],
+  [0x1a, 'mot', 'temp', 'Перегрів MOS', 't', 0.1, 1, -40, 150, 'motr'],
+  [0x1b, 'motr', 'temp', null, 't', 0.1, 1, -40, 150],
+  [0x06, 'baltrig', 'bal', 'Різниця для балансу', 'v', 0.001, 3, 0.001, 1],
+  [0x22, 'balstart', 'bal', 'Напруга старту балансу', 'v', 0.001, 3, 2, 4.6],
+  [0x13, 'balcur', 'bal', 'Макс. струм балансу', 'v', 0.001, 1, 0.1, 10],
+  [0x1c, 'cells', 'bat', 'Кількість банок', 'i', 1, 0, 1, 32],
+  [0x20, 'cap', 'bat', 'Ємність батареї', 'v', 0.001, 1, 1, 2000, null, 'Ah'],
+  [0x1d, 'swChg', 'sw', 'Заряд (MOS)', 'b'],
+  [0x1e, 'swDsg', 'sw', 'Розряд (MOS)', 'b'],
+  [0x1f, 'swBal', 'sw', 'Балансування', 'b'],
+].map(a => ({ r: a[0], k: a[1], g: a[2], n: a[3], t: a[4], s: a[5], d: a[6], min: a[7], max: a[8], pair: a[9], u: a[10] ?? (a[4] === 'v' ? (a[5] === 0.001 && a[6] === 1 ? 'A' : 'V') : a[4] === 't' ? '°C' : '') }));
+const JKPK = Object.fromEntries(JKP.map(p => [p.k, p]));
+const JK_GROUPS = [['sw', 'Перемикачі'], ['cell', 'Напруга банки'], ['bal', 'Баланс'], ['cur', 'Струм і КЗ'], ['temp', 'Температура'], ['bat', 'Батарея']];
+function jkParse(f) {
+  const o = {};
+  for (const p of JKP) { const off = (p.r - 1) * 4 + 6; o[p.k] = le(f, off, 4, p.t === 't'); }
+  jkSet = o;
+  // перевірка, що розмітка кадру відповідає цій прошивці — інакше запис вимкнено
+  const ok = o.cells >= 1 && o.cells <= 32 && (!cellsMv.length || o.cells === cellsMv.length)
+    && o.ovp >= 2000 && o.ovp <= 4600 && o.uvp >= 1500 && o.uvp < o.ovp && o.ovpr <= o.ovp && o.uvpr >= o.uvp
+    && [0, 1].includes(o.swChg) && [0, 1].includes(o.swDsg) && [0, 1].includes(o.swBal);
+  if (ok !== jkSane) log('JK налаштування: ' + (ok ? 'розмітка підтверджена — запис дозволено' : 'значення не пройшли перевірку — запис вимкнено, скиньте сирий кадр налаштувань'));
+  jkSane = ok;
+}
+const jkDisp = (p, raw) => p.t === 'b' ? (raw ? 'увімк.' : 'вимк.') : p.t === 'i' ? String(raw) : (raw * p.s).toFixed(p.d);
+const jkCur = k => (k in jkEdits) ? jkEdits[k] : jkSet?.[k];
+function renderJkParams() {
+  if (driver !== 'jk') return;
+  if (!jkSet) { $('pBody').innerHTML = '<div class="empty">Очікую кадр налаштувань від JK… <button class="btn sm" id="jkReq">Запросити</button></div>'; updateDirtyBar(); return; }
+  $('pInfo').textContent = 'Отримано о ' + new Date(jkSetAt).toLocaleTimeString('uk-UA') + (jkSane ? '' : ' · запис вимкнено: розмітка не підтверджена');
+  const html = [];
+  for (const [g, title] of JK_GROUPS) {
+    const ps = JKP.filter(p => p.g === g);
+    const dirty = ps.filter(p => p.k in jkEdits).length;
+    let body = '';
+    if (ps.some(p => p.pair)) body += '<div class="pr head"><span></span><span>Поріг</span><span>Відновл.</span></div>';
+    for (const p of ps) {
+      if (!p.n) continue;
+      if (p.t === 'b') {
+        body += `<div class="bitrow"><span>${p.n}${p.k in jkEdits ? ' <span class="was">змінено</span>' : ''}</span><button class="sw ${jkCur(p.k) ? 'on' : ''}" data-jksw="${p.k}" aria-label="${p.n}" ${jkSane ? '' : 'disabled'}></button></div>`;
+        continue;
+      }
+      const inp = q => `<input inputmode="decimal" data-jk="${q.k}" value="${jkDisp(q, jkCur(q.k))}" class="${q.k in jkEdits ? 'ch' : ''}" aria-label="${q.n || q.k}" ${jkSane ? '' : 'disabled'}>`;
+      const keys = p.pair ? [p, JKPK[p.pair]] : [p];
+      const was = keys.some(q => q.k in jkEdits) ? `<span class="was">було ${keys.map(q => jkDisp(q, jkSet[q.k])).join(' / ')}</span>` : '';
+      const nm = `<span class="nm">${p.n} <span class="unit">${p.u}</span>${was}</span>`;
+      body += p.pair ? `<div class="pr">${nm}${inp(p)}${inp(JKPK[p.pair])}</div>` : `<div class="pr single">${nm}${inp(p)}</div>`;
+    }
+    html.push(`<div class="grp open ${dirty ? 'dirty' : ''}"><div class="gh">${title}${dirty ? `<span class="cnt">${dirty} зм.</span>` : ''}</div><div class="gb">${body}</div></div>`);
+  }
+  $('pBody').innerHTML = html.join('') + '<div class="lbl" style="text-align:center">Регістри JK02. Зміни записуються лише після «Записати…».</div>';
+  updateDirtyBar();
+}
+$('pBody').addEventListener('change', e => {
+  const k = e.target.dataset.jk; if (!k || driver !== 'jk') return;
+  const p = JKPK[k], v = parseFloat(String(e.target.value).replace(',', '.'));
+  if (isNaN(v) || v < p.min || v > p.max) { e.target.classList.add('err'); toast(`${p.n || k}: допустимо ${p.min}…${p.max}`); return; }
+  const raw = p.t === 'i' ? Math.round(v) : Math.round(v / p.s);
+  if (raw === jkSet[k]) delete jkEdits[k]; else jkEdits[k] = raw;
+  renderJkParams();
+});
+$('pBody').addEventListener('click', e => {
+  if (driver !== 'jk') return;
+  if (e.target.id === 'jkReq') { jkRequestSettings(); return; }
+  const k = e.target.closest('[data-jksw]')?.dataset.jksw; if (!k) return;
+  const v = jkCur(k) ? 0 : 1;
+  if (v === jkSet[k]) delete jkEdits[k]; else jkEdits[k] = v;
+  renderJkParams();
+});
+function jkValidate(v) {
+  const err = [], warn = [];
+  if (v.ovpr >= v.ovp) err.push('Відновлення перезаряду має бути нижче порогу');
+  if (v.uvpr <= v.uvp) err.push('Відновлення переразряду має бути вище порогу');
+  if (v.uvp >= v.ovp) err.push('Переразряд вище перезаряду');
+  if (v.poff >= v.uvp) warn.push('Напруга вимкнення BMS не нижча за поріг переразряду');
+  if (v.rcv > v.ovp) err.push('Напруга заряду (RCV) вище порогу перезаряду');
+  if (v.cotr >= v.cot || v.dotr >= v.dot || v.motr >= v.mot) err.push('Відновлення перегріву має бути нижче порогу');
+  if (v.cutr <= v.cut) err.push('Відновлення холоду має бути вище порогу');
+  if (v.cells !== jkSet.cells) warn.push(`Кількість банок ${jkSet.cells} → ${v.cells}: перевірте balance-шлейф`);
+  if (v.swDsg === 0 && jkSet.swDsg === 1) warn.push('Розряд буде вимкнено — навантаження знеструмиться');
+  return { err, warn };
+}
+async function jkRequestSettings(timeout = 5000) {
+  const p = new Promise(res => { jkSetWaiter = res; setTimeout(() => { if (jkSetWaiter === res) { jkSetWaiter = null; res(); } }, timeout); });
+  await jkSend(0x97).catch(() => {});
+  await sleep(400);
+  await jkSend(0x96).catch(() => {});
+  await p;
+}
+const le4 = v => { v = v < 0 ? v + 2 ** 32 : v; return [v & 0xff, (v >>> 8) & 0xff, (v >>> 16) & 0xff, (v >>> 24) & 0xff]; };
+async function jkWriteRegs(changes) {
+  for (const c of changes) { await jkSend(c.r, le4(c.neu)); await sleep(350); }
+  await sleep(500);
+  const before = jkSetAt;
+  await jkRequestSettings();
+  if (jkSetAt === before) return { verified: false, bad: [] };
+  return { verified: true, bad: changes.filter(c => jkSet[c.k] !== c.neu) };
+}
+async function jkWriteFlow() {
+  if (!jkSane) return toast('Запис вимкнено: розмітка налаштувань не підтверджена');
+  const keys = Object.keys(jkEdits); if (!keys.length) return;
+  const vals = { ...jkSet, ...jkEdits }, v = jkValidate(vals);
+  const changes = keys.map(k => { const p = JKPK[k]; return { k, r: p.r, neu: jkEdits[k], label: p.n || (JKP.find(x => x.pair === k)?.n + ' (відновл.)'), oldS: jkDisp(p, jkSet[k]), newS: jkDisp(p, jkEdits[k]) + ' ' + p.u }; });
+  try { localStorage.setItem('jbd_jk_backup', JSON.stringify({ date: new Date().toISOString(), device: dev?.name, settings: jkSet })); } catch (_) {}
+  const html = `<p class="lbl" style="font-size:14px">Буде змінено ${changes.length}. Поточні налаштування збережено як авто-копію.</p>
+    <div class="diff"><div><span>Параметр</span><span>Було</span><span></span><span>Стане</span></div>${changes.map(c => `<div><span>${c.label}</span><s class="mono">${c.oldS}</s><span>→</span><b class="mono">${c.newS}</b></div>`).join('')}</div>
+    ${v.err.map(x => `<div class="note bad">${x}</div>`).join('')}${v.warn.map(x => `<div class="note warn">${x}</div>`).join('')}
+    ${!v.err.length && !v.warn.length ? '<div class="note ok">Перевірка: значення узгоджені</div>' : ''}`;
+  if (!(await sheetConfirm('Записати в JK BMS?', html, 'Записати', !!v.err.length))) return;
+  try {
+    const r = await jkWriteRegs(changes);
+    jkEdits = {}; renderJkParams();
+    if (!r.verified) toast('Записано, але BMS не надіслала налаштування для звірки — натисніть «Запросити» пізніше', 5000);
+    else if (r.bad.length) sheetConfirm('Розбіжність після запису', r.bad.map(c => `<div class="note bad">${c.label}: очікувалось ${c.newS}, зараз ${jkDisp(JKPK[c.k], jkSet[c.k])}</div>`).join(''), 'Зрозуміло', false, true);
+    else toast('Записано і звірено: ' + changes.length);
+  } catch (e) { toast(e.message); log('JK запис: ' + e.message); }
+}
+async function jkSwitch(reg) {
+  const p = JKP.find(x => x.r === reg);
+  if (!jkSane || !jkSet) return toast('Спочатку дочекайтесь налаштувань JK (вкладка «Параметри»)');
+  const neu = jkSet[p.k] ? 0 : 1;
+  const ok = await sheetConfirm((neu ? 'Увімкнути ' : 'Вимкнути ') + p.n.toLowerCase() + '?', !neu && reg === 0x1e ? '<div class="note warn">Навантаження буде знеструмлено.</div>' : '', neu ? 'Увімкнути' : 'Вимкнути');
+  if (!ok) return;
+  const r = await jkWriteRegs([{ k: p.k, r: reg, neu }]);
+  toast(r.verified && !r.bad.length ? 'Виконано' : 'Команду надіслано, але підтвердження немає');
 }
 
 let manualDisc = false;
@@ -551,10 +740,11 @@ async function reconnect() {
 }
 function setConn(s) {
   connState = s;
+  setTimeout(renderKnown, 0);
   $('cDot').className = 'dot' + (s === 'on' ? ' on' : '');
   $('cTxt').textContent = s === 'on' ? 'Підключено' : s === 'conn' ? 'Скасувати' : 'Підключити';
   $('dSub').textContent = s === 'on' ? (driver === 'fel' ? 'SN ' + (felInfo?.DevSN || felRaw?.DevSN || '—') : driver === 'generic' ? 'універсальний режим' : (dev?.id?.slice(0, 17) || '') + (devStrings.hw ? ' · ' + devStrings.hw : '')) : s === 'conn' ? 'підключення… (натисніть, щоб скасувати)' : 'не підключено';
-  $('swChg').disabled = $('swDsg').disabled = s !== 'on' || driver !== 'jbd';
+  $('swChg').disabled = $('swDsg').disabled = s !== 'on' || !(driver === 'jbd' || driver === 'jk');
 }
 // кнопка-тригер: Підключити → (Скасувати під час підключення) → Відключити
 $('bConn').onclick = async () => {
@@ -702,6 +892,7 @@ function drawChart(cv, arr, color, rangeEl, unit, d, zero) {
 /* ---------- MOS ---------- */
 async function setMos(which) {
   if (!basic) return;
+  if (driver === 'jk') return jkSwitch(which === 'c' ? 0x1d : 0x1e);
   let chg = !!(basic.fet & 1), dsg = !!(basic.fet & 2);
   if (which === 'c') chg = !chg; else dsg = !dsg;
   const what = which === 'c' ? 'заряд' : 'розряд';
@@ -801,6 +992,7 @@ const curDisp = k => toDisp(PK[k], cur(k));
 /* ---------- читання параметрів ---------- */
 async function readParams(pw) {
   if (!txCh) { toast('Спочатку підключіться'); return false; }
+  if (driver === 'jk') { $('bReadP').disabled = true; await jkRequestSettings(); $('bReadP').disabled = false; renderJkParams(); if (!jkSet) toast('BMS не надіслала налаштування'); return !!jkSet; }
   if (driver === 'fel') { toast('Для Felicity налаштування поки недоступні'); return false; }
   $('bReadP').disabled = true; $('pInfo').textContent = 'Читаю…';
   try {
@@ -922,11 +1114,11 @@ $('pBody').addEventListener('change', e => {
   setEdit(k, toRaw(p, v)); renderParams();
 });
 function updateDirtyBar() {
-  const n = Object.keys(edits).length;
+  const n = Object.keys(driver === 'jk' ? jkEdits : edits).length;
   $('dBar').classList.toggle('show', n > 0 && document.querySelector('#v-par.act') != null);
   $('dTxt').textContent = n + ' ' + (n === 1 ? 'незбережена зміна' : n < 5 ? 'незбережені зміни' : 'незбережених змін');
 }
-$('bReset').onclick = () => { edits = {}; renderParams(); };
+$('bReset').onclick = () => { if (driver === 'jk') { jkEdits = {}; renderJkParams(); return; } edits = {}; renderParams(); };
 
 /* ---------- перевірка ---------- */
 function validate(vals) {
@@ -1000,6 +1192,7 @@ async function writeFlow(changes, title, rawRegs) {
   } catch (e) { toast(e.message, 4000); log('запис: ' + e.message); return false; }
 }
 $('bWrite').onclick = () => {
+  if (driver === 'jk') return jkWriteFlow();
   const changes = Object.keys(edits).map(k => {
     const p = PK[k];
     return { label: (p.n || PK[P.find(x => x.pair === k)?.k]?.n + ' (відновл.)') + (GROUPS.find(g => g[0] === p.g) ? ' · ' + GROUPS.find(g => g[0] === p.g)[1].split(' (')[0] : ''), reg: p.r, old: params[k], neu: edits[k], oldS: dispStr(p, params[k]), newS: dispStr(p, edits[k]) };
@@ -1094,7 +1287,7 @@ function renderDevInfo() {
     const i = jkInfo || {};
     $('devInfo').innerHTML = [['Bluetooth-ім\'я', dev?.name], ['Тип', 'JK BMS'], ['Модель', i.model], ['Апаратна версія', i.hw], ['Прошивка', i.sw], ['Ім\'я в BMS', i.name], ['Серійний номер', i.sn], ['Протокол', jkOffs ? 'JK02_24S' : 'JK02_32S'], ['SOH', basic?.soh != null ? basic.soh + ' %' : null], ['Цикли', basic?.cycles]]
       .filter(r => r[1] != null && r[1] !== '').map(r => `<div class="kv"><span>${r[0]}</span><span>${String(r[1]).replace(/</g, '&lt;')}</span></div>`).join('');
-    $('felRaw').textContent = jkRaw ? hex(jkRaw) : '—';
+    $('felRaw').textContent = (jkRaw ? 'Дані (0x02):\n' + hex(jkRaw) : '—') + (jkSettings ? '\n\nНалаштування (0x01):\n' + hex(jkSettings) : '');
     return;
   }
   if (driver === 'generic') {
@@ -1149,6 +1342,7 @@ document.querySelector('.tabs').onclick = e => {
   document.querySelectorAll('.view').forEach(v => v.classList.toggle('act', v.id === 'v-' + b.dataset.v));
   updateDirtyBar();
   if (b.dataset.v === 'mon') renderMon();
+  if (b.dataset.v === 'par' && driver === 'jk') renderJkParams();
   if (b.dataset.v === 'srv') { renderDevInfo(); renderAutoBk(); }
   window.scrollTo(0, 0);
 };
@@ -1158,7 +1352,7 @@ window.addEventListener('resize', () => renderMon());
 /* ---------- PWA ---------- */
 if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(e => log('SW: ' + e.message));
 renderAutoBk(); renderDevInfo();
-$('bFelCopy').onclick = async () => { try { await navigator.clipboard.writeText(driver === 'atorch' ? atRawHex : driver === 'jk' ? (jkRaw ? hex(jkRaw) : '') : JSON.stringify(felRaw, null, 1)); toast('Скопійовано'); } catch (_) { toast('Не вдалося скопіювати'); } };
+$('bFelCopy').onclick = async () => { try { await navigator.clipboard.writeText(driver === 'atorch' ? atRawHex : driver === 'jk' ? $('felRaw').textContent : JSON.stringify(felRaw, null, 1)); toast('Скопійовано'); } catch (_) { toast('Не вдалося скопіювати'); } };
 $('atCard').addEventListener('click', async e => {
   const k = e.target.closest('[data-at]')?.dataset.at; if (!k) return;
   if (k === 'resetAll' && !(await sheetConfirm('Скинути всі лічильники?', '<p>Ah, Wh і час роботи на навантаженні буде обнулено.</p>', 'Скинути'))) return;
@@ -1190,3 +1384,6 @@ function releaseBt() {
 }
 window.addEventListener('pagehide', releaseBt);
 window.addEventListener('beforeunload', releaseBt);
+
+$('known').addEventListener('click', e => { const i = e.target.closest('[data-known]')?.dataset.known; if (i != null && knownDevs[+i]) connectKnown(knownDevs[+i]); });
+renderKnown();
