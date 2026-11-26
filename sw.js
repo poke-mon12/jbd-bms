@@ -1,5 +1,5 @@
 // Кеш оболонки застосунку. При зміні файлів збільшуйте CACHE.
-const CACHE = 'jbd-pwa-1.2.0';
+const CACHE = 'jbd-pwa-1.3.0';
 const FILES = ['./', './index.html', './app.js', './manifest.webmanifest', './icon.svg', './icon-192.png', './icon-512.png'];
 
 self.addEventListener('install', e => {

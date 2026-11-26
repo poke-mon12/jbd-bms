@@ -148,6 +148,19 @@ canvas{width:100%;height:80px;display:block}
 
     <div class="grid3" id="temps"></div>
 
+    <div class="card" id="atCard" style="display:none">
+      <div class="ct"><span>Навантаження Atorch</span></div>
+      <div id="atBody" style="margin-top:4px"></div>
+      <div class="grid2" style="margin-top:10px">
+        <button class="btn" data-at="minus">− менше</button><button class="btn" data-at="plus">+ більше</button>
+        <button class="btn" data-at="setup">Setup</button><button class="btn" data-at="enter">OK / Старт</button>
+      </div>
+      <div class="grid2" style="margin-top:10px">
+        <button class="btn sm" data-at="resetAh">Скинути Ah</button><button class="btn sm" data-at="resetWh">Скинути Wh</button>
+        <button class="btn sm" data-at="resetTime">Скинути час</button><button class="btn sm danger" data-at="resetAll">Скинути все</button>
+      </div>
+    </div>
+
     <div class="card" id="limCard" style="display:none">
       <div class="ct"><span>Ліміти BMS для інвертора</span></div>
       <div id="limBody" style="margin-top:4px"></div>
@@ -216,7 +229,7 @@ canvas{width:100%;height:80px;display:block}
     </div>
 
     <div class="card" id="felRawCard" style="display:none">
-      <div class="ct"><span>Сирі дані BMS (JSON)</span><small><button class="btn sm" id="bFelCopy">Копіювати</button></small></div>
+      <div class="ct"><span id="felRawTitle">Сирі дані BMS (JSON)</span><small><button class="btn sm" id="bFelCopy">Копіювати</button></small></div>
       <pre id="felRaw" style="background:var(--bg);border-radius:10px;padding:10px;font:11px/1.45 ui-monospace,Menlo,monospace;max-height:300px;overflow:auto;white-space:pre-wrap;word-break:break-all;margin:8px 0 0">—</pre>
     </div>
 
