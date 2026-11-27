@@ -1,6 +1,6 @@
 'use strict';
 /* JBD BMS PWA — Web Bluetooth, протокол JBD (Xiaoxiang) */
-const VERSION = '1.8.0';
+const VERSION = '1.8.1';
 const SVC = 0xff00, RX = 0xff01, TX = 0xff02;
 // Felicity Solar (FLA/FLB/LPBF): текстові команди, відповідь JSON
 const FEL_SVC = '6e6f736a-4643-4d44-8fa9-0fafd005e455';
@@ -523,6 +523,8 @@ function jkNotify(e) {
   jkFrame(f);
 }
 const jkStr = (f, a, b) => new TextDecoder().decode(new Uint8Array(f.slice(a, b))).replace(/\0.*$/s, '').trim();
+// лише друковані ASCII-символи від початку діапазону (для паролів/текстових полів)
+function jkText(f, a, b) { let o = ''; for (let i = a; i < b && i < f.length; i++) { const c = f[i]; if (c < 0x20 || c > 0x7e) break; o += String.fromCharCode(c); } return o; }
 function jkFrame(f) {
   const type = f[4];
   if (driver !== 'ffe0' && driver !== 'jk') return;
@@ -534,12 +536,13 @@ function jkFrame(f) {
   }
   if (type === 0x03) {
     jkInfoRaw = f.slice();
-    jkInfo = { model: jkStr(f, 6, 22), hw: jkStr(f, 22, 30), sw: jkStr(f, 30, 38), name: jkStr(f, 46, 62), sn: jkStr(f, 86, 94) };
+    jkInfo = { model: jkStr(f, 6, 22), hw: jkStr(f, 22, 30), sw: jkStr(f, 30, 38), name: jkStr(f, 46, 62), sn: jkStr(f, 86, 94),
+      connPw: jkText(f, 62, 78), userData: jkText(f, 102, 118), setPw: jkText(f, 118, 134) };
     jkSw = parseInt(jkInfo.sw) || 0;
     jkOffs = jkSw && jkSw < 11 ? -32 : 0;
     if (!jkInfoLogged) log('JK: ' + jkInfo.model + ', hw ' + jkInfo.hw + ', sw ' + jkInfo.sw + (jkOffs ? ' (протокол JK02_24S)' : ' (протокол JK02_32S)'));
     jkInfoLogged = true;
-    renderDevInfo(); setConn('on');
+    renderDevInfo(); setConn('on'); jkPwInit();
     return;
   }
   if (type === 0x01) {
@@ -1434,8 +1437,14 @@ const jkPwKey = () => 'jbd_jkpw_' + (dev?.name || 'jk');
 function jkPwInit() {
   if (driver !== 'jk') { $('jkPwCard').style.display = 'none'; return; }
   $('jkPwCard').style.display = '';
-  try { $('jkPw').value = localStorage.getItem(jkPwKey()) || ''; } catch (_) {}
-  $('jkPwOut').style.display = 'none';
+  const c = jkInfo?.connPw, p = jkInfo?.setPw;
+  const row = (lbl, v) => `<div class="kv"><span>${lbl}</span><b class="mono" style="user-select:all">${v ? v.replace(/</g, '&lt;') : '—'}</b></div>`;
+  $('jkPwRead').innerHTML = (c != null || p != null)
+    ? '<div class="lbl" style="margin-bottom:4px">Прочитано з BMS:</div>' + row('Пароль на підключення', c) + row('Пароль на налаштування', p) + '<div class="lbl" style="margin-top:4px">Притисніть значення, щоб виділити й скопіювати.</div>'
+    : '<div class="lbl">Паролі зчитуються з кадру пристрою після підключення…</div>';
+  // підставляємо прочитаний пароль на налаштування, якщо поле порожнє і нема збереженого
+  let saved = ''; try { saved = localStorage.getItem(jkPwKey()) || ''; } catch (_) {}
+  $('jkPw').value = saved || p || '';
 }
 function jkPwOut(t) { const el = $('jkPwOut'); el.style.display = ''; el.textContent = t; }
 $('jkPwSave').onclick = () => {

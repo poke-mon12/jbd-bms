@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <meta name="theme-color" content="#14181C">
-<meta name="app-ver" content="1.8.0">
+<meta name="app-ver" content="1.8.1">
 <link rel="manifest" href="manifest.webmanifest">
 <link rel="icon" href="icon.svg" type="image/svg+xml">
 <link rel="apple-touch-icon" href="icon-192.png">
@@ -224,21 +224,23 @@ canvas{width:100%;height:80px;display:block}
 
     <div class="card" id="jkPwCard" style="display:none">
       <div class="ct">Паролі JK</div>
-      <p class="lbl" style="font-size:13px;margin:4px 0 10px">У JK два незалежні паролі: на підключення (за замовчуванням 1234) і на зміну параметрів (за замовчуванням 123456). До цієї BMS застосунок під'єднується без пароля на підключення, тож він не потрібен. Пароль на налаштування потрібен для запису параметрів.</p>
+      <p class="lbl" style="font-size:13px;margin:4px 0 10px">У JK два незалежні паролі: на підключення (типово 1234) і на зміну параметрів (типово 123456). До цієї BMS застосунок під'єднується без пароля на підключення. Обидва паролі зчитуються з BMS і показані нижче.</p>
 
-      <label class="f" for="jkPw">Пароль на налаштування</label>
+      <div id="jkPwRead" style="margin-bottom:12px"></div>
+
+      <label class="f" for="jkPw">Пароль на налаштування (для надсилання і запису)</label>
       <div style="display:flex;gap:8px;margin-top:4px">
         <input id="jkPw" class="f mono" style="margin-top:0;flex:1" placeholder="напр. 123456" autocomplete="off">
         <button class="btn" id="jkPwSave" style="width:auto;padding:0 14px">Зберегти</button>
       </div>
       <label class="bitrow" style="padding:10px 0;border:0"><span>Надсилати пароль перед записом параметрів</span><input type="checkbox" id="jkPwBefore"></label>
-      <p class="lbl" style="font-size:12px;margin:0 0 10px">Увімкніть, якщо ваша BMS відхиляє запис без пароля. Формат команди авторизації взято з відкритих розборів протоколу і на цій прошивці не підтверджений.</p>
+      <p class="lbl" style="font-size:12px;margin:0 0 10px">Увімкніть, якщо ваша BMS відхиляє запис без пароля. Надсилається значення з поля вище. Формат команди авторизації взято з відкритих розборів протоколу і на цій прошивці не підтверджений.</p>
 
       <div class="grid2">
         <button class="btn" id="jkPwAuth">Надіслати пароль</button>
         <button class="btn" id="jkPwFind">Шукати в кадрах</button>
       </div>
-      <p class="lbl" style="font-size:12px;margin-top:8px">«Шукати в кадрах» читає кадри пристрою й налаштувань і шукає в них введений пароль (а також показує текстові фрагменти). Надійно прочитати забутий пароль на класичному протоколі JK02, найімовірніше, не вийде — це експеримент.</p>
+      <p class="lbl" style="font-size:12px;margin-top:8px">«Шукати в кадрах» показує текстовий вміст кадрів пристрою й налаштувань і, якщо ввести пароль у поле вище, шукає, де він лежить. Корисно, якщо паролі вгорі не зчиталися.</p>
       <pre id="jkPwOut" style="background:var(--bg);border-radius:10px;padding:10px;font:11px/1.45 ui-monospace,Menlo,monospace;max-height:220px;overflow:auto;white-space:pre-wrap;word-break:break-all;margin:8px 0 0;display:none"></pre>
     </div>
 
@@ -304,6 +306,6 @@ canvas{width:100%;height:80px;display:block}
 <div class="sheetbg" id="sheetBg"><div class="sheet"><div class="grab"></div><div id="sheetC"></div></div></div>
 <div class="toast" id="toast"></div>
 
-<script src="app.js?v=1.8.0"></script>
+<script src="app.js?v=1.8.1"></script>
 </body>
 </html>
