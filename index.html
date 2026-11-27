@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <meta name="theme-color" content="#14181C">
-<meta name="app-ver" content="1.6.3">
+<meta name="app-ver" content="1.8.0">
 <link rel="manifest" href="manifest.webmanifest">
 <link rel="icon" href="icon.svg" type="image/svg+xml">
 <link rel="apple-touch-icon" href="icon-192.png">
@@ -23,10 +23,13 @@ button{font:inherit;cursor:pointer}
 .pill{height:36px;padding:0 12px;border-radius:18px;border:1px solid #3A434C;background:transparent;color:#fff;font-weight:600;font-size:13px;display:flex;align-items:center;gap:6px;white-space:nowrap}
 .dot{width:8px;height:8px;border-radius:4px;background:#8a949e}
 .dot.on{background:#34C46E}
-.gauge{width:120px;height:120px;border-radius:60px;display:flex;align-items:center;justify-content:center;flex:none}
-.gin{width:100px;height:100px;border-radius:50px;background:var(--dark);display:flex;flex-direction:column;align-items:center;justify-content:center}
-.soc{font-size:32px;font-weight:700;line-height:1}
-.bigv{font-size:30px;font-weight:700}
+.gauge{width:150px;height:150px;border-radius:75px;position:relative;display:flex;align-items:center;justify-content:center;flex:none}
+.gin{width:126px;height:126px;border-radius:63px;background:var(--dark);display:flex;flex-direction:column;align-items:center;justify-content:center}
+.soc{font-size:42px;font-weight:700;line-height:1}
+.gauge.loading::after{content:"";position:absolute;inset:0;border-radius:50%;border:6px solid transparent;border-top-color:#0B6BCB;border-right-color:#0B6BCB;animation:spin .9s linear infinite}
+@keyframes spin{to{transform:rotate(360deg)}}
+.dot.pulse{box-shadow:0 0 0 5px rgba(52,196,110,.35);transition:box-shadow .15s}
+.bigv{font-size:40px;font-weight:700;line-height:1.1}
 .alert{border-radius:10px;padding:9px 12px;font-size:13px;margin-top:12px;display:none}
 .alert.warn{display:block;background:#3A2A12;color:#FFC77A}
 .alert.bad{display:block;background:#3d1512;color:#FFB4AB}
@@ -124,12 +127,12 @@ canvas{width:100%;height:80px;display:block}
     </div>
     <div class="hrow" style="margin-top:14px;justify-content:flex-start;gap:16px">
       <div class="gauge" id="gauge" style="background:conic-gradient(#2A3138 0 100%)">
-        <div class="gin"><div class="soc"><span id="mSoc">—</span><span style="font-size:15px">%</span></div><div class="dsub" id="mCap" style="margin-top:4px">— Ah</div></div>
+        <div class="gin"><div class="soc"><span id="mSoc">—</span><span style="font-size:18px">%</span></div><div class="dsub" id="mCap" style="margin-top:6px;font-size:13px;text-align:center">— Ah</div></div>
       </div>
       <div style="flex:1;min-width:0">
-        <div class="bigv mono"><span id="mV">—</span><span style="font-size:15px;color:#A9B4BF"> V</span></div>
-        <div style="display:flex;gap:14px;font-size:15px;color:#D5DCE2"><span id="mA">— A</span><span id="mW">— W</span></div>
-        <div class="dsub" id="mState" style="margin-top:6px">—</div>
+        <div class="bigv mono"><span id="mV">—</span><span style="font-size:18px;color:#A9B4BF"> V</span></div>
+        <div style="display:flex;gap:16px;font-size:20px;font-weight:600;color:#D5DCE2;margin-top:4px;flex-wrap:wrap"><span id="mA">— A</span><span id="mW">— W</span></div>
+        <div class="dsub" id="mState" style="margin-top:8px;font-size:13px">—</div>
       </div>
     </div>
     <div id="known" style="margin-top:6px;display:flex;flex-wrap:wrap;align-items:center"></div>
@@ -137,10 +140,6 @@ canvas{width:100%;height:80px;display:block}
   </div>
 
   <div class="wrap" id="monBody">
-    <div class="grid2">
-      <div class="card hrow"><div><div class="lbl">Заряд MOS</div><div style="font-weight:600" id="mChgT">—</div></div><button class="sw" id="swChg" disabled aria-label="Заряд MOS"></button></div>
-      <div class="card hrow"><div><div class="lbl">Розряд MOS</div><div style="font-weight:600" id="mDsgT">—</div></div><button class="sw" id="swDsg" disabled aria-label="Розряд MOS"></button></div>
-    </div>
 
     <div class="card">
       <div class="ct"><span id="cTitle">Банки</span><small id="cDelta"></small></div>
@@ -194,6 +193,12 @@ canvas{width:100%;height:80px;display:block}
     <div class="lbl" id="pInfo" style="margin-top:4px">Ще не прочитано</div>
     <div class="filters" id="pFilt"></div>
   </div>
+  <div class="wrap" id="mosBox" style="padding-bottom:0;display:none">
+    <div class="grid2" id="mosGrid">
+      <div class="card hrow"><div><div class="lbl">Заряд MOS</div><div style="font-weight:600" id="mChgT">—</div></div><button class="sw" id="swChg" disabled aria-label="Заряд MOS"></button></div>
+      <div class="card hrow"><div><div class="lbl">Розряд MOS</div><div style="font-weight:600" id="mDsgT">—</div></div><button class="sw" id="swDsg" disabled aria-label="Розряд MOS"></button></div>
+    </div>
+  </div>
   <div class="wrap" id="pBody" style="padding-bottom:90px"><div class="empty">Підключіться і натисніть «Прочитати з BMS»</div></div>
 </section>
 
@@ -215,6 +220,26 @@ canvas{width:100%;height:80px;display:block}
       </div>
       <input type="file" id="fRestore" accept=".json,application/json" hidden>
       <div class="lbl" id="autoBk" style="margin-top:8px"></div>
+    </div>
+
+    <div class="card" id="jkPwCard" style="display:none">
+      <div class="ct">Паролі JK</div>
+      <p class="lbl" style="font-size:13px;margin:4px 0 10px">У JK два незалежні паролі: на підключення (за замовчуванням 1234) і на зміну параметрів (за замовчуванням 123456). До цієї BMS застосунок під'єднується без пароля на підключення, тож він не потрібен. Пароль на налаштування потрібен для запису параметрів.</p>
+
+      <label class="f" for="jkPw">Пароль на налаштування</label>
+      <div style="display:flex;gap:8px;margin-top:4px">
+        <input id="jkPw" class="f mono" style="margin-top:0;flex:1" placeholder="напр. 123456" autocomplete="off">
+        <button class="btn" id="jkPwSave" style="width:auto;padding:0 14px">Зберегти</button>
+      </div>
+      <label class="bitrow" style="padding:10px 0;border:0"><span>Надсилати пароль перед записом параметрів</span><input type="checkbox" id="jkPwBefore"></label>
+      <p class="lbl" style="font-size:12px;margin:0 0 10px">Увімкніть, якщо ваша BMS відхиляє запис без пароля. Формат команди авторизації взято з відкритих розборів протоколу і на цій прошивці не підтверджений.</p>
+
+      <div class="grid2">
+        <button class="btn" id="jkPwAuth">Надіслати пароль</button>
+        <button class="btn" id="jkPwFind">Шукати в кадрах</button>
+      </div>
+      <p class="lbl" style="font-size:12px;margin-top:8px">«Шукати в кадрах» читає кадри пристрою й налаштувань і шукає в них введений пароль (а також показує текстові фрагменти). Надійно прочитати забутий пароль на класичному протоколі JK02, найімовірніше, не вийде — це експеримент.</p>
+      <pre id="jkPwOut" style="background:var(--bg);border-radius:10px;padding:10px;font:11px/1.45 ui-monospace,Menlo,monospace;max-height:220px;overflow:auto;white-space:pre-wrap;word-break:break-all;margin:8px 0 0;display:none"></pre>
     </div>
 
     <div class="card flush">
@@ -279,6 +304,6 @@ canvas{width:100%;height:80px;display:block}
 <div class="sheetbg" id="sheetBg"><div class="sheet"><div class="grab"></div><div id="sheetC"></div></div></div>
 <div class="toast" id="toast"></div>
 
-<script src="app.js?v=1.6.3"></script>
+<script src="app.js?v=1.8.0"></script>
 </body>
 </html>

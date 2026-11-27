@@ -1,6 +1,6 @@
 'use strict';
 /* JBD BMS PWA — Web Bluetooth, протокол JBD (Xiaoxiang) */
-const VERSION = '1.6.3';
+const VERSION = '1.8.0';
 const SVC = 0xff00, RX = 0xff01, TX = 0xff02;
 // Felicity Solar (FLA/FLB/LPBF): текстові команди, відповідь JSON
 const FEL_SVC = '6e6f736a-4643-4d44-8fa9-0fafd005e455';
@@ -298,7 +298,8 @@ function applyDriverUi0() {
   $('genMon').style.display = gen ? '' : 'none';
   $('genMonT').textContent = probe ? 'Визначаю тип пристрою…' : 'Невідомий пристрій';
   $('genMonP').textContent = probe ? 'Пристрій має сервіс FFE0: чекаю відповіді JK BMS або Atorch (до 6 с).' : 'Підключено в універсальному режимі. Карта BLE-сервісів, усі вхідні дані і відправка команд — у вкладці «Сервіс».';
-  document.querySelector('#monBody .grid2').style.display = fel && !jk ? 'none' : '';
+  $('mosBox').style.display = driver === 'jbd' ? '' : 'none';
+  jkPwInit();
   $('cTitle').closest('.card').style.display = at ? 'none' : '';
   $('prot').closest('.card').style.display = at ? 'none' : '';
   $('atCard').style.display = driver === 'atorch' ? '' : 'none';
@@ -397,7 +398,7 @@ async function atConnect(srv, svcs) {
   rxCh = ch; txCh = ch; atBuf = [];
   ch.addEventListener('characteristicvaluechanged', atNotify);
   ch.addEventListener('characteristicvaluechanged', jkNotify);
-  jkBuf = []; jkLast = 0; jkInfo = null; jkSeen = false; jkInfoLogged = false; jkSet = null; jkSettings = null; jkEdits = {}; jkSane = false;
+  jkBuf = []; jkLast = 0; jkInfo = null; jkInfoRaw = null; jkSeen = false; jkInfoLogged = false; jkSet = null; jkSettings = null; jkEdits = {}; jkSane = false;
   await ch.startNotifications();
   $('dName').textContent = dev.name || 'FFE0';
   // JK BMS відповідає лише на запит: просимо інформацію про пристрій (0x97), потім дані банок (0x96)
@@ -495,7 +496,7 @@ function renderAtorch() {
 
 
 /* ---------- JK BMS (JK02, BLE FFE0/FFE1) ---------- */
-let jkInfoLogged = false;
+let jkInfoLogged = false, jkInfoRaw = null;
 let jkBuf = [], jkLast = 0, jkInfo = null, jkSeen = false, jkSw = 0, jkOffs = 0, jkRaw = null, jkSettings = null;
 const JK_HDR = [0x55, 0xaa, 0xeb, 0x90], JK_LEN = 300;
 const le = (d, i, n, signed) => { let v = 0; for (let k = n - 1; k >= 0; k--) v = v * 256 + d[i + k]; if (signed && v >= 2 ** (8 * n - 1)) v -= 2 ** (8 * n); return v; };
@@ -532,6 +533,7 @@ function jkFrame(f) {
     applyDriverUi();
   }
   if (type === 0x03) {
+    jkInfoRaw = f.slice();
     jkInfo = { model: jkStr(f, 6, 22), hw: jkStr(f, 22, 30), sw: jkStr(f, 30, 38), name: jkStr(f, 46, 62), sn: jkStr(f, 86, 94) };
     jkSw = parseInt(jkInfo.sw) || 0;
     jkOffs = jkSw && jkSw < 11 ? -32 : 0;
@@ -562,7 +564,7 @@ function jkFrame(f) {
     jk: true,
     v: le(f, 150 + o, 4) / 1000, a: le(f, 158 + o, 4, true) / 1000,
     soc: f[173 + o], remain: le(f, 174 + o, 4) / 1000, nominal: le(f, 178 + o, 4) / 1000,
-    cycles: le(f, 182 + o, 4), soh: f[190 + o],
+    cycles: le(f, 182 + o, 4), cycleAh: le(f, 186 + o, 4) / 1000, soh: f[190 + o],
     fet: (f[198 + o] ? 1 : 0) | (f[199 + o] ? 2 : 0),
     cells: n, temps, tnames, bal: 0, prot: 0,
     balCur: le(f, 170 + o, 2, true) / 1000, balOn: !!f[172 + o],
@@ -701,6 +703,7 @@ async function jkRequestSettings(timeout = 5000) {
 }
 const le4 = v => { v = v < 0 ? v + 2 ** 32 : v; return [v & 0xff, (v >>> 8) & 0xff, (v >>> 16) & 0xff, (v >>> 24) & 0xff]; };
 async function jkWriteRegs(changes) {
+  if ($('jkPwBefore')?.checked) await jkAuth(true);
   for (const c of changes) { await jkSend(c.r, le4(c.neu)); await sleep(350); }
   await sleep(500);
   const before = jkSetAt;
@@ -756,6 +759,8 @@ async function reconnect() {
   setConn('off');
 }
 function setConn(s) {
+  if (s === 'on' && connState !== 'on') { dataTs = 0; basic = null; atLast = null; cellsMv = []; hist.length = 0; setLoading(true); }
+  if (s !== 'on') setLoading(false);
   connState = s;
   if (s === 'off') setTimeout(renderKnown, 0); else if ($('known')) $('known').innerHTML = '';
   $('cDot').className = 'dot' + (s === 'on' ? ' on' : '');
@@ -817,7 +822,18 @@ function parseBasic(d) {
 const PROT = ['Перезаряд банки', 'Перерозряд банки', 'Перезаряд пакета', 'Перерозряд пакета', 'Перегрів при заряді', 'Холод при заряді', 'Перегрів при розряді', 'Холод при розряді', 'Струм заряду', 'Струм розряду', 'Коротке замикання', 'Помилка AFE', 'Програмне блокування MOS'];
 
 /* ---------- рендер моніторингу ---------- */
+let dataTs = 0;
+function setLoading(on) {
+  $('gauge').classList.toggle('loading', on);
+  if (on) { $('mSoc').textContent = '—'; $('mCap').textContent = 'Отримую дані…'; $('mV').textContent = '—'; $('mA').textContent = '— A'; $('mW').textContent = '— W'; $('mState').textContent = '—'; }
+}
+function dataTick() {
+  if (!dataTs) setLoading(false);
+  dataTs = Date.now();
+  const d = $('cDot'); d.classList.add('pulse'); setTimeout(() => d.classList.remove('pulse'), 250);
+}
 function renderMon() {
+  if ((driver === 'atorch' && atLast) || (driver !== 'atorch' && basic)) dataTick();
   if (driver === 'atorch') return renderAtorch();
   if (driver === 'generic' || driver === 'ffe0') return;
   const b = basic; if (!b) return;
@@ -833,7 +849,8 @@ function renderMon() {
   let eta = '';
   if (b.a <= -1 && b.remain != null) eta = ' · ~' + fmt(b.remain / -b.a, 1) + ' год';
   if (b.a >= 1 && b.remain != null && b.nominal != null) eta = ' · до повного ~' + fmt((b.nominal - b.remain) / b.a, 1) + ' год';
-  $('mState').textContent = st + eta + ' · ' + b.cells + 'S' + (b.soh != null ? ' · SOH ' + fmt(b.soh, 0) + ' %' : '') + (b.cycles !== '—' ? ' · ' + b.cycles + ' циклів' : '');
+  const eq = b.cycleAh != null && b.nominal ? b.cycleAh / b.nominal : null;
+  $('mState').textContent = st + eta + ' · ' + b.cells + 'S' + (b.soh != null ? ' · SOH ' + fmt(b.soh, 0) + ' %' : '') + (b.cycles !== '—' ? ' · циклів: ' + b.cycles + (eq != null ? ' (екв. ' + fmt(eq, 1) + ')' : '') : '');
   const chg = !!(b.fet & 1), dsg = !!(b.fet & 2);
   $('swChg').classList.toggle('on', chg); $('mChgT').textContent = chg ? 'Увімкнено' : 'Вимкнено';
   $('swDsg').classList.toggle('on', dsg); $('mDsgT').textContent = dsg ? 'Увімкнено' : 'Вимкнено';
@@ -1306,7 +1323,7 @@ function renderDevInfo() {
   }
   if (driver === 'jk') {
     const i = jkInfo || {};
-    $('devInfo').innerHTML = [['Bluetooth-ім\'я', dev?.name], ['Тип', 'JK BMS'], ['Модель', i.model], ['Апаратна версія', i.hw], ['Прошивка', i.sw], ['Ім\'я в BMS', i.name], ['Серійний номер', i.sn], ['Протокол', jkOffs ? 'JK02_24S' : 'JK02_32S'], ['SOH', basic?.soh != null ? basic.soh + ' %' : null], ['Цикли', basic?.cycles]]
+    $('devInfo').innerHTML = [['Bluetooth-ім\'я', dev?.name], ['Тип', 'JK BMS'], ['Модель', i.model], ['Апаратна версія', i.hw], ['Прошивка', i.sw], ['Ім\'я в BMS', i.name], ['Серійний номер', i.sn], ['Протокол', jkOffs ? 'JK02_24S' : 'JK02_32S'], ['SOH', basic?.soh != null ? basic.soh + ' %' : null], ['Цикли (лічильник BMS)', basic?.cycles], ['Прокачано через батарею', basic?.cycleAh != null ? fmt(basic.cycleAh, 1) + ' Ah' : null], ['Еквівалент повних циклів', basic?.cycleAh != null && basic?.nominal ? fmt(basic.cycleAh / basic.nominal, 2) : null]]
       .filter(r => r[1] != null && r[1] !== '').map(r => `<div class="kv"><span>${r[0]}</span><span>${String(r[1]).replace(/</g, '&lt;')}</span></div>`).join('');
     $('felRaw').textContent = (jkRaw ? 'Дані (0x02):\n' + hex(jkRaw) : '—') + (jkSettings ? '\n\nНалаштування (0x01):\n' + hex(jkSettings) : '');
     return;
@@ -1411,3 +1428,49 @@ renderKnown();
 
 try { $('genWide').checked = localStorage.getItem('jbd_wide_probe') === '1'; } catch (_) {}
 $('genWide').onchange = e => { try { localStorage.setItem('jbd_wide_probe', e.target.checked ? '1' : '0'); } catch (_) {} toast(e.target.checked ? 'Розширений список увімкнено — діє з наступного підключення' : 'Розширений список вимкнено'); };
+
+/* ---------- JK: паролі (розділ у «Сервіс») ---------- */
+const jkPwKey = () => 'jbd_jkpw_' + (dev?.name || 'jk');
+function jkPwInit() {
+  if (driver !== 'jk') { $('jkPwCard').style.display = 'none'; return; }
+  $('jkPwCard').style.display = '';
+  try { $('jkPw').value = localStorage.getItem(jkPwKey()) || ''; } catch (_) {}
+  $('jkPwOut').style.display = 'none';
+}
+function jkPwOut(t) { const el = $('jkPwOut'); el.style.display = ''; el.textContent = t; }
+$('jkPwSave').onclick = () => {
+  try { localStorage.setItem(jkPwKey(), $('jkPw').value.trim()); toast('Пароль збережено на цьому телефоні'); } catch (_) { toast('Не вдалося зберегти'); }
+};
+// експериментальна авторизація: надсилаємо пароль ASCII у поле пароля/керування (рег. 0xC9 за відкритими розборами)
+async function jkAuth(quiet) {
+  const pw = ($('jkPw').value || '').trim();
+  if (!pw) { if (!quiet) toast('Введіть пароль'); return; }
+  const bytes = Array.from(new TextEncoder().encode(pw));
+  await jkSend(0xC9, bytes);
+  if (!quiet) { log('JK: надіслано пароль на рег. 0xC9 (' + pw.length + ' символів) — дивіться відповідь у «Протокол обміну»'); toast('Пароль надіслано (експеримент)'); }
+}
+$('jkPwAuth').onclick = () => jkAuth(false).catch(e => toast(e.message));
+// пошук пароля у кадрах пристрою (0x03) і налаштувань (0x01)
+$('jkPwFind').onclick = async () => {
+  jkPwOut('Читаю кадри…');
+  try { await jkRequestSettings(); } catch (_) {}
+  const pw = ($('jkPw').value || '').trim();
+  const lines = [];
+  const dump = (name, f) => {
+    if (!f) { lines.push(name + ': немає кадру'); return; }
+    const arr = Array.from(f);
+    lines.push('── ' + name + ' (' + arr.length + ' байт) ──');
+    lines.push('ASCII: ' + asciiOf(arr));
+    if (pw) {
+      const a = Array.from(new TextEncoder().encode(pw));
+      let at = -1;
+      for (let i = 0; i + a.length <= arr.length; i++) if (a.every((b, j) => arr[i + j] === b)) { at = i; break; }
+      lines.push(a.length && at >= 0 ? '✓ введений пароль знайдено у зсуві ' + at : '✗ введеного пароля в цьому кадрі немає');
+    }
+  };
+  dump('Кадр пристрою 0x03', jkInfoRaw);
+  dump('Кадр налаштувань 0x01', jkSettings);
+  if (!pw) lines.push('Підказка: введіть відомий пароль вище і натисніть знову — застосунок покаже, де він лежить у кадрі.');
+  jkPwOut(lines.join('\n'));
+  log('JK: пошук пароля в кадрах виконано');
+};
