@@ -1,6 +1,6 @@
 'use strict';
 /* JBD BMS PWA — Web Bluetooth, протокол JBD (Xiaoxiang) */
-const VERSION = '1.8.1';
+const VERSION = '1.10.1';
 const SVC = 0xff00, RX = 0xff01, TX = 0xff02;
 // Felicity Solar (FLA/FLB/LPBF): текстові команди, відповідь JSON
 const FEL_SVC = '6e6f736a-4643-4d44-8fa9-0fafd005e455';
@@ -9,6 +9,8 @@ const FEL_TX = '49535258-184d-4bd9-bc61-20c647249616';
 let driver = 'jbd';             // 'jbd' | 'fel' | 'ffe0' (визначення) | 'atorch' | 'jk' | 'generic'
 // Atorch DL24 / DL24P / DL24M (електронне навантаження): FFE0/FFE1, пакети FF 55 01 <тип> …
 const AT_SVC = 0xffe0, AT_CH = 0xffe1;
+// Daly Smart BMS (серія H/K/M/S, протокол D2/Modbus): FFF0/FFF1(notify)/FFF2(write), кадри 0xD2
+const DALY_SVC = 0xfff0, DALY_RX = 0xfff1, DALY_TX = 0xfff2;
 let atBuf = [], atDev = 2, atLast = null, atRawHex = '';
 // загальновідомі сервіси, щоб для невідомих пристроїв показати GATT-карту
 const PROBE_SVCS = [0xff00, 0xffe0, 0xffe5, 0xfff0, 0xffd0, 0xffc0, 0xffb0, 0xffa0, 0xff10, 0xff12, 0xfe95, 0xfee0, 0xfee7, 0xfee9, 0xfd00, 0xae00, 0xae30, 0xa002,
@@ -111,18 +113,31 @@ function extraUuids() {
     .map(x => /^[0-9a-f]{4}$/.test(x) ? parseInt(x, 16) : x).filter(x => typeof x === 'number' || /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(x)); } catch (_) { return []; }
 }
 // підключення до вже дозволеного пристрою без сканування (якщо Chrome підтримує getDevices)
+let zombiesCleared = false;
+async function clearZombies() {
+  // з минулої сесії міг лишитись відкритий GATT: тоді пристрій не рекламує себе і не з'являється у вікні пошуку
+  try {
+    if (!navigator.bluetooth?.getDevices) return;
+    const list = await navigator.bluetooth.getDevices();
+    for (const d of list) { try { if (d.gatt?.connected) { d.gatt.disconnect(); log('закрив залишкове з\'єднання: ' + (d.name || d.id)); } } catch (_) {} }
+  } catch (_) {}
+}
 async function renderKnown() {
   const box = $('known'); if (!box) return;
+  if (!zombiesCleared) { zombiesCleared = true; await clearZombies(); }
   let list = [];
   try { if (navigator.bluetooth?.getDevices) list = await navigator.bluetooth.getDevices(); } catch (_) {}
   knownDevs = list;
-  box.innerHTML = connState === 'off' && list.length ? '<span class="dsub">Швидке підключення:</span>' + list.map((d, i) => `<button class="pill" data-known="${i}" style="height:32px;margin:6px 6px 0 0">${(d.name || d.id).replace(/</g, '&lt;')}</button>`).join('') : '';
+  if (connState !== 'off' || !list.length) { box.innerHTML = ''; return; }
+  box.innerHTML = '<div class="dsub" style="width:100%;margin-bottom:2px">Швидке підключення (без пошуку):</div>' +
+    list.map((d, i) => `<button class="pill" data-known="${i}" style="height:34px;margin:0 6px 6px 0;background:#1f6feb;border-color:#1f6feb">${(d.name || d.id).replace(/</g, '&lt;')}</button>`).join('');
 }
 let knownDevs = [];
 async function connectKnown(d) {
   cancelConn = false;
   try { if (dev?.gatt?.connected) { manualDisc = true; dev.gatt.disconnect(); await sleep(300); } } catch (_) {}
   dev = d;
+  if (dev.gatt?.connected) { try { dev.gatt.disconnect(); await sleep(400); } catch (_) {} }
   dev.removeEventListener?.('gattserverdisconnected', onDisc);
   dev.addEventListener('gattserverdisconnected', onDisc);
   setConn('conn');
@@ -134,20 +149,27 @@ async function connectKnown(d) {
     toast('Не вдалося без сканування — пристрій поза зоною або вже підключений. Спробуйте «Підключити».', 5000);
   }
 }
+let scanTimes = [];
+function showScanHint(t) { const el = $('scanHint'); if (!el) return; if (t) { el.textContent = t; el.style.display = ''; } else el.style.display = 'none'; }
 async function connect() {
   if (!navigator.bluetooth) { toast('Web Bluetooth недоступний. Відкрийте в Chrome на Android.', 4000); return; }
   cancelConn = false;
+  const now = Date.now(); scanTimes = scanTimes.filter(t => now - t < 30000); scanTimes.push(now);
+  if (scanTimes.length >= 4) showScanHint('Android блокує частий пошук Bluetooth (понад 5 за 30 с). Якщо вікно порожнє — зачекайте ~30 с, або скористайтесь кнопкою швидкого підключення вгорі, або вимкніть і ввімкніть Bluetooth.');
+  await clearZombies();
   // стара сесія могла лишити GATT-з'єднання: підключений пристрій не рекламує себе і не з'являється у списку
   try { if (dev?.gatt?.connected) { manualDisc = true; dev.gatt.disconnect(); await sleep(300); } } catch (_) {}
   try {
     let wide = false; try { wide = localStorage.getItem('jbd_wide_probe') === '1'; } catch (_) {}
-    dev = await navigator.bluetooth.requestDevice({ acceptAllDevices: true, optionalServices: [...new Set([SVC, FEL_SVC, AT_SVC, ...(wide ? PROBE_SVCS : []), ...extraUuids()])] });
+    dev = await navigator.bluetooth.requestDevice({ acceptAllDevices: true, optionalServices: [...new Set([SVC, FEL_SVC, AT_SVC, DALY_SVC, ...(wide ? PROBE_SVCS : []), ...extraUuids()])] });
     dev.addEventListener('gattserverdisconnected', onDisc);
     setConn('conn');
     await gattConnect();
   } catch (e) {
     if (cancelConn) { log('підключення скасовано'); setConn('off'); return; }
-    setConn('off'); log('помилка: ' + e.message); if (e.name !== 'NotFoundError') toast(e.message);
+    setConn('off'); log('помилка: ' + e.message);
+    if (e.name === 'NotFoundError') showScanHint('Пошук нічого не знайшов. Варіанти: кнопка швидкого підключення вгорі (без пошуку); зачекати ~30 с через обмеження Android; або вимкнути/ввімкнути Bluetooth.');
+    else toast(e.message);
     try { if (dev?.gatt?.connected) { manualDisc = true; dev.gatt.disconnect(); } } catch (_) {}
   }
 }
@@ -172,14 +194,18 @@ async function gattConnect() {
   if (cancelConn) throw new Error('скасовано');
   const r = await listServices(gatt); gatt = r.gatt;
   const svcs = r.svcs, has = u => svcs.find(s => shortU(s.uuid) === (typeof u === 'number' ? u.toString(16).padStart(4, '0') : u));
+  const hasChar = async (srv, u) => { try { return srv ? await srv.getCharacteristic(u) : null; } catch (_) { return null; } };
   let srv = null;
   if ((srv = has(SVC))) driver = 'jbd';
   else if ((srv = has(FEL_SVC))) driver = 'fel';
-  else if ((srv = has(AT_SVC)) && (await srv.getCharacteristic(AT_CH).catch(() => null))) driver = 'ffe0';
+  else if ((srv = has(AT_SVC)) && (await hasChar(srv, AT_CH))) driver = 'ffe0';
+  else if ((srv = has(DALY_SVC)) && (await hasChar(srv, DALY_RX))) driver = 'daly-probe';
   else { driver = 'generic'; return genConnect(svcs); }
-  log('тип пристрою: ' + ({ jbd: 'JBD BMS', fel: 'Felicity Solar', ffe0: 'сервіс FFE0 (UART-модуль) — визначаю: JK BMS чи Atorch…' })[driver]);
+  showScanHint('');
+  log('тип пристрою: ' + ({ jbd: 'JBD BMS', fel: 'Felicity Solar', 'ffe0': 'сервіс FFE0 (UART-модуль) — визначаю: JK BMS чи Atorch…', 'daly-probe': 'сервіс FFF0 — перевіряю Daly…' })[driver]);
   if (driver === 'fel') return felConnect(srv);
   if (driver === 'ffe0') return atConnect(srv, svcs);
+  if (driver === 'daly-probe') return dalyConnect(srv, svcs);
   rxCh = await srv.getCharacteristic(RX);
   txCh = await srv.getCharacteristic(TX);
   rxCh.addEventListener('characteristicvaluechanged', onNotify);
@@ -293,7 +319,7 @@ function applyDriverUi0() {
   const gen = driver === 'generic' || probe;
   const at = driver === 'atorch' || gen;
   const jk = driver === 'jk';
-  const fel = driver === 'fel' || at || jk;     // «не JBD»: ховаємо EEPROM-функції
+  const fel = driver === 'fel' || at || jk || driver === 'daly';     // «не JBD»: ховаємо EEPROM-функції
   $('genCard').style.display = driver === 'generic' ? '' : 'none';
   $('genMon').style.display = gen ? '' : 'none';
   $('genMonT').textContent = probe ? 'Визначаю тип пристрою…' : 'Невідомий пристрій';
@@ -310,7 +336,7 @@ function applyDriverUi0() {
   $('bCnt').closest('.bitrow').style.display = fel ? 'none' : '';
   $('pFilt').style.display = fel ? 'none' : '';
   $('felRawCard').style.display = fel && !gen ? '' : 'none';
-  $('felRawTitle').textContent = jk ? 'Сирий кадр JK (hex)' : $('felRawTitle').textContent;
+  $('felRawTitle').textContent = jk ? 'Сирий кадр JK (hex)' : driver === 'daly' ? 'Сирий кадр Daly (hex)' : $('felRawTitle').textContent;
   if (driver !== 'fel') $('limCard').style.display = 'none';
   if (!at) $('temps').style.display = '';
   if (fel) {
@@ -321,6 +347,10 @@ function applyDriverUi0() {
     } else if (at) {
       $('pInfo').textContent = gen ? 'Невідомий пристрій: параметрів немає' : 'Atorch DL24: параметрів EEPROM немає';
       $('pBody').innerHTML = '<div class="card"><div class="ct">Atorch DL24</div><p class="lbl" style="font-size:14px">Керування навантаженням — кнопками на вкладці «Моніторинг» (як кнопки на самому приладі). Сирий пакет — у «Сервісі».</p></div>';
+      $('bReadP').disabled = true;
+    } else if (driver === 'daly') {
+      $('pInfo').textContent = 'Daly BMS';
+      $('pBody').innerHTML = '<div class="card"><div class="ct">Daly Smart BMS</div><p class="lbl" style="font-size:14px">Моніторинг працює. Зміна параметрів Daly — наступним кроком, після звірки даних з офіційним застосунком. Сирий кадр — у «Сервісі».</p></div>';
       $('bReadP').disabled = true;
     } else {
     $('pInfo').textContent = 'Felicity: зміна параметрів ще не підтримується';
@@ -743,6 +773,100 @@ async function jkSwitch(reg) {
   toast(r.verified && !r.bad.length ? 'Виконано' : 'Команду надіслано, але підтвердження немає');
 }
 
+
+/* ---------- Daly Smart BMS (D2 / Modbus над BLE) ---------- */
+let dalyBuf = [], dalyWaiter = null, dalyLast = 0, dalyInfo = null, dalyRaw = null, dalyMosTemp = null, dalyMosTried = false;
+function crc16m(a) { let c = 0xffff; for (const b of a) { c ^= b; for (let i = 0; i < 8; i++) c = (c & 1) ? ((c >>> 1) ^ 0xA001) : (c >>> 1); } return c & 0xffff; }
+const u16b = (d, i) => (d[i] << 8) | d[i + 1];
+function dalyFrame(dev_id, fct, addr, count) {
+  const f = [dev_id, fct, (addr >> 8) & 0xff, addr & 0xff, (count >> 8) & 0xff, count & 0xff];
+  const c = crc16m(f); f.push(c & 0xff, (c >> 8) & 0xff); return new Uint8Array(f);
+}
+function dalyNotify(e) {
+  dalyBuf.push(...new Uint8Array(e.target.value.buffer));
+  for (;;) {
+    const si = dalyBuf.findIndex((b, i) => b === 0xD2 && dalyBuf[i + 1] === 0x03);
+    if (si < 0) { if (dalyBuf.length > 300) dalyBuf = []; return; }
+    if (si > 0) dalyBuf = dalyBuf.slice(si);
+    if (dalyBuf.length < 3) return;
+    const total = 3 + dalyBuf[2] + 2;
+    if (dalyBuf.length < total) return;
+    const p = dalyBuf.slice(0, total); dalyBuf = dalyBuf.slice(total);
+    const crc = crc16m(p.slice(0, total - 2));
+    if ((p[total - 2] | (p[total - 1] << 8)) !== crc) { log('Daly: CRC не збігається'); continue; }
+    log('← Daly ' + hex(p), dalyLast && p[2] === 124);
+    if (dalyWaiter && (dalyWaiter.bc == null || dalyWaiter.bc === p[2])) { const w = dalyWaiter; dalyWaiter = null; clearTimeout(w.t); w.res(p); }
+  }
+}
+async function dalyCmd(addr, count, timeout = 3500) {
+  if (!txCh) throw new Error('не підключено');
+  const bc = count * 2, f = dalyFrame(0xD2, 0x03, addr, count);
+  log('→ Daly ' + hex(f), dalyLast && count === 62);
+  dalyBuf = [];
+  const p = new Promise((res, rej) => { dalyWaiter = { bc, res, t: setTimeout(() => { dalyWaiter = null; rej(new Error('тайм-аут Daly')); }, timeout) }; });
+  try { await txCh.writeValueWithoutResponse(f); } catch (_) { await txCh.writeValueWithResponse(f); }
+  return p;
+}
+async function dalyConnect(srv, svcs) {
+  rxCh = await srv.getCharacteristic(DALY_RX);
+  txCh = await srv.getCharacteristic(DALY_TX);
+  rxCh.addEventListener('characteristicvaluechanged', dalyNotify);
+  dalyBuf = []; dalyLast = 0; dalyInfo = null; dalyRaw = null; dalyMosTemp = null; dalyMosTried = false;
+  await rxCh.startNotifications();
+  $('dName').textContent = dev.name || 'Daly BMS';
+  setConn('conn');
+  log('підключено: ' + (dev.name || dev.id) + ' — пробую Daly D2…');
+  try {
+    const p = await dalyCmd(0x0000, 62, 5000);
+    dalyParse(p); driver = 'daly';
+    log('Daly D2 підтверджено');
+    setConn('on'); applyDriverUi();
+    try { const i = await dalyCmd(0x00A9, 32); dalyInfo = { sw: dalyText(i, 3, 19), hw: dalyText(i, 19, 35) }; } catch (_) {}
+    renderDevInfo(); startPoll();
+  } catch (e) {
+    log('Daly не відповів (' + e.message + ') — універсальний режим');
+    driver = 'generic';
+    try { await rxCh.stopNotifications(); } catch (_) {}
+    rxCh.removeEventListener?.('characteristicvaluechanged', dalyNotify);
+    await genConnect(svcs || []);
+  }
+}
+const dalyText = (f, a, b) => { let o = ''; for (let i = a; i < b && i < f.length; i++) { const c = f[i]; if (c >= 0x20 && c <= 0x7e) o += String.fromCharCode(c); } return o.trim(); };
+function dalyParse(p) {
+  dalyRaw = p; dalyLast = Date.now();
+  const H = 3;
+  const cc = u16b(p, H + 98);
+  const n = Math.min(cc > 0 && cc <= 48 ? cc : 0, 48);
+  const cells = []; for (let i = 0; i < n; i++) cells.push(u16b(p, H + i * 2));
+  const nt = Math.min(u16b(p, H + 100) || 0, 8);
+  const temps = []; const tbase = 32 * 2 + H;
+  for (let i = 0; i < nt; i++) { const t = u16b(p, tbase + i * 2) - 40; if (t > -40 && t < 150) temps.push(t); }
+  if (dalyMosTemp != null) temps.unshift(dalyMosTemp);
+  let prob = 0; for (let i = 0; i < 8; i++) prob = prob * 256 + p[H + 116 + i];
+  basic = {
+    daly: true,
+    v: u16b(p, H + 80) / 10,
+    a: (u16b(p, H + 82) - 30000) / 10,
+    soc: Math.round(u16b(p, H + 84) / 10),
+    remain: u16b(p, H + 96) / 10,
+    nominal: null,
+    cycles: u16b(p, H + 102),
+    cells: n, temps,
+    tnames: (dalyMosTemp != null ? ['MOS'] : []).concat(Array.from({ length: nt }, (_, i) => 'T' + (i + 1))),
+    bal: 0, prot: 0,
+    fet: (u16b(p, H + 106) ? 1 : 0) | (u16b(p, H + 108) ? 2 : 0),
+    delta: u16b(p, H + 112),
+    fault: prob, warn: 0,
+  };
+  cellsMv = cells;
+}
+async function dalyPoll() {
+  if (!dalyMosTried) { dalyMosTried = true; try { const m = await dalyCmd(0x003E, 9); const t = u16b(m, 3 + 8) - 40; if (t > -40 && t < 150) dalyMosTemp = t; } catch (_) {} }
+  const p = await dalyCmd(0x0000, 62); dalyParse(p);
+  if (document.querySelector('#v-srv.act')) renderDevInfo();
+}
+
+
 let manualDisc = false;
 function onDisc() {
   const wasOn = connState === 'on';
@@ -795,6 +919,7 @@ async function poll() {
   if (!txCh || busy) return;
   try {
     if (driver === 'generic' || driver === 'ffe0') return;
+    if (driver === 'daly') { await dalyPoll(); } else
     if (driver === 'jk') { await jkPoll(); if (!jkLast) return; if (document.querySelector('#v-srv.act')) renderDevInfo(); } else
     if (driver === 'atorch') { if (!atLast) return; } else
     if (driver === 'fel') await felPoll(); else
@@ -859,7 +984,7 @@ function renderMon() {
   $('swDsg').classList.toggle('on', dsg); $('mDsgT').textContent = dsg ? 'Увімкнено' : 'Вимкнено';
 
   const act = PROT.filter((_, i) => b.prot & (1 << i));
-  if (b.fel || b.jk) {
+  if (b.fel || b.jk || b.daly) {
     if (b.fault) act.push('Аварія BMS, код 0x' + b.fault.toString(16).toUpperCase());
     if (b.warn) act.push('Попередження BMS, код 0x' + b.warn.toString(16).toUpperCase());
   }
@@ -888,9 +1013,9 @@ function renderMon() {
     $('cLegend').innerHTML = `<span>макс ${fmt(max / 1000, 3)}</span><span>мін ${fmt(min / 1000, 3)}</span><span>сер ${fmt(avg / 1000, 3)} V</span>` + (b.bal ? '<span style="color:#146C3B">● балансування</span>' : '');
   }
   // температури
-  if (b.jk) {
-    $('temps').innerHTML = b.temps.map((t, i) => `<div class="card"><div class="lbl">${b.tnames[i]}</div><div class="val">${fmt(t, 1)} °C</div></div>`).join('');
-    $('cDelta').innerHTML += b.balOn ? ` · баланс <b class="mono">${fmt(b.balCur, 2)} A</b>` : '';
+  if (b.jk || b.daly) {
+    $('temps').innerHTML = b.temps.map((t, i) => `<div class="card"><div class="lbl">${b.tnames[i] || ('T' + (i + 1))}</div><div class="val">${fmt(t, 1)} °C</div></div>`).join('');
+    if (b.jk) $('cDelta').innerHTML += b.balOn ? ` · баланс <b class="mono">${fmt(b.balCur, 2)} A</b>` : '';
   } else {
   const tCards = b.fel ? b.temps.map((t, i) => ['Банки T' + (i + 1), t]).concat((b.boardTemps || []).map((t, i) => ['Плата BMS ' + (i + 1), t])) : null;
   if (b.fel) {
@@ -1320,6 +1445,13 @@ $('bCsv').onclick = () => {
 
 /* ---------- пристрій ---------- */
 function renderDevInfo() {
+  if (driver === 'daly') {
+    const rows = [['Bluetooth-ім\'я', dev?.name], ['Тип', 'Daly Smart BMS (D2)'], ['Прошивка', dalyInfo?.sw], ['Апаратна версія', dalyInfo?.hw], ['Банок', basic?.cells], ['Цикли', basic?.cycles]]
+      .filter(r => r[1] != null && r[1] !== '');
+    $('devInfo').innerHTML = rows.map(r => `<div class="kv"><span>${r[0]}</span><span>${String(r[1]).replace(/</g, '&lt;')}</span></div>`).join('');
+    $('felRaw').textContent = dalyRaw ? hex(dalyRaw) : '—';
+    return;
+  }
   if (driver === 'ffe0') {
     $('devInfo').innerHTML = `<div class="kv"><span>Bluetooth-ім'я</span><span>${dev?.name || '—'}</span></div><div class="kv"><span>Тип</span><span>визначається…</span></div>`;
     return;
@@ -1393,7 +1525,7 @@ window.addEventListener('resize', () => renderMon());
 /* ---------- PWA ---------- */
 if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(e => log('SW: ' + e.message));
 renderAutoBk(); renderDevInfo();
-$('bFelCopy').onclick = async () => { try { await navigator.clipboard.writeText(driver === 'atorch' ? atRawHex : driver === 'jk' ? $('felRaw').textContent : JSON.stringify(felRaw, null, 1)); toast('Скопійовано'); } catch (_) { toast('Не вдалося скопіювати'); } };
+$('bFelCopy').onclick = async () => { try { await navigator.clipboard.writeText(driver === 'atorch' ? atRawHex : (driver === 'jk' || driver === 'daly') ? $('felRaw').textContent : JSON.stringify(felRaw, null, 1)); toast('Скопійовано'); } catch (_) { toast('Не вдалося скопіювати'); } };
 $('atCard').addEventListener('click', async e => {
   const k = e.target.closest('[data-at]')?.dataset.at; if (!k) return;
   if (k === 'resetAll' && !(await sheetConfirm('Скинути всі лічильники?', '<p>Ah, Wh і час роботи на навантаженні буде обнулено.</p>', 'Скинути'))) return;
